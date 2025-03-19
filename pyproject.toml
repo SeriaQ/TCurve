@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tcurve"
+version = "0.0.2"
+description = "A sleek tool that displays visually appealing progress bars and draws metric based curves in real-time."
+                # + " v0.0.2: add README.",
+                # + " v0.0.1: initial publication as an individual package.",
+                # python _cleanup.py && python -m build && twine upload dist/*
+authors = [{name = "Seria", email = "zzqsummerai@yeah.net"}]
+readme = "README.md"
+dependencies = ['numpy',
+                'pandas',
+                'matplotlib',
+                'seaborn']
