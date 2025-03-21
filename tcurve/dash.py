@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
-from utils import curve2str
+from .utils import curve2str
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np

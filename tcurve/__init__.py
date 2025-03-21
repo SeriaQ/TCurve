@@ -21,4 +21,4 @@ Email: zzqsummerai@yeah.net
 
 '''
 # -*- coding:utf-8 -*-
-from dash import Dash, RAW, PERCENT, INVIZ, IMAGE, CUSTOM
+from .dash import Dash, RAW, PERCENT, INVIZ, IMAGE, CUSTOM
