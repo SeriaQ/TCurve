@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tcurve"
-version = "0.0.4"
+version = "0.1.0"
 description = "A sleek tool that displays visually appealing progress bars and draws metric based curves in real-time."
+                # + " v0.1.0: update README.",
                 # + " v0.0.4: fix an inner file bug.",
                 # + " v0.0.3: fix an import bug.",
                 # + " v0.0.2: add README.",
