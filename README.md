@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://ooo.0x0.ooo/2025/03/19/OSKUBC.png" alt="tcurve-icon.png" width = "180" height = "120" />
+  <img src="https://ooo.0x0.ooo/2025/03/19/OSKUBC.png" alt="tcurve-icon.png" width = "150" height = "100" />
 </p>
 <h1 align="center">TCurve</h1>
 

@@ -6,6 +6,7 @@ __pycache__/
 *$py.class
 
 # Distribution / packaging
+pyproject.toml
 .Python
 *.pyo
 *.pyd
