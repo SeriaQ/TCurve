@@ -62,6 +62,30 @@ for i, a in enumerate(fake_acc):
 
 
 
+The genre macros are listed below.
+
+- RAW: display as it is
+- PERCENT: shown as xx.yy% for example
+- INVIZ: do not display but log to files
+- IMAGE: to visualize the image using characters. usually collocated with lambda *x:1 (or lambda *x:0) to display on terminal (or not)
+- CUSTOM: define your own function to process the content. the function is supposed to be like
+
+```python
+def process_fn(value, epoch, mile, mpe, stage):
+  # value: the loss/accuracy/generated image or anything else you get in this step
+  # epoch: the current epoch
+  # mile: the current step/iter within this epoch
+  # mpe: how many steps/iters an epoch would go through
+  # stage: the current stage, which is input by users
+  
+  # ----- do something here ----- #
+  
+  # return a string to display
+```
+
+
+
+
 ------
 
 ## 🔥 Dive Deeper
@@ -84,7 +108,7 @@ for i, a in enumerate(fake_acc):
     tcd({'Accuracy': a}, 0, i, len(fake_acc), is_global=True)
 ```
 
-Make is_elastic=True to dynamically stretch or squeeze the vertical axis.
+Let is_global=False to view the recent changes of this curve.
 
 ```python
 tcd = tc.Dash(format={'Acc': ['.1f', tc.PERCENT]})
