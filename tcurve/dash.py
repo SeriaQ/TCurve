@@ -189,7 +189,7 @@ class Dash(object):
             if isinstance(value, np.ndarray) and value.dtype == np.float16:
                 value = value.astype(np.float32)
             self.win_mile[name][(global_mile - 1) % self.window] = value
-            if mile == 1: # the start of an epoch
+            if len(self.gauge_epoch[name]) == 0: # the start of an epoch
                 self.gauge_epoch[name].append(value)
             else:
                 self.gauge_epoch[name][-1] += value # accumulate values
