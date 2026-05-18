@@ -1,14 +1,34 @@
 import os
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
+
+
+def _import_plotting_deps():
+    try:
+        import matplotlib.pyplot as plt
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError(
+            'TCurve plotting utilities require optional dependencies: pandas and matplotlib.'
+        ) from exc
+    return plt, pd
 
 
 
 def curve2str(curve, divisor, span, is_global, is_elastic, x_title='x', y_title='y'):
-    assert curve.ndim == 1 and span > 9 # must be a vector
+    if curve.ndim != 1:
+        raise ValueError('TCURVE ERROR ៙ "curve" must be a vector.')
+    if span <= 9:
+        raise ValueError('TCURVE ERROR ៙ "span" must be greater than 9, but got %d.' % span)
+    if divisor <= 0:
+        raise ValueError('TCURVE ERROR ៙ "divisor" must be positive, but got %d.' % divisor)
     try:
-        assert os.get_terminal_size().columns > span + 10 + 5  # ensure that curve is not too long to display
+        columns = os.get_terminal_size().columns
+        required_width = span + 15
+        if required_width > columns:
+            raise ValueError(
+                'TCURVE ERROR ៙ "span" is too large for the terminal width: span=%d requires at least %d columns, but terminal width is %d.' %
+                (span, required_width, columns)
+            )
     except OSError:
         pass
 
@@ -28,6 +48,9 @@ def curve2str(curve, divisor, span, is_global, is_elastic, x_title='x', y_title=
     delta = (y_max - y_min) / divisor
     if delta == 0.:
         grid = [[10 * ' ' + ' ┃ ', span * ' ', '\n'] for i in range(1, divisor + 1)]
+        if divisor > 0:
+            mid = min(max(divisor // 2, 0), divisor - 1)
+            grid[mid][1] = span * line_type['horizontal']
         grid.append([10 * ' ' + ' ▲ ', span * ' ', '\n'])
     else:
         if is_elastic:
@@ -116,7 +139,7 @@ def curve2str(curve, divisor, span, is_global, is_elastic, x_title='x', y_title=
             delimiter = [i * delta for i in range(1, divisor+1)]
 
         grid = [[f'{y_min + d:>10.3f} ┃ ', span * ' ', '\n'] for d in delimiter]
-        grid.append([10 * ' ' + ' ▲︎ ', span * ' ', '\n'])
+        grid.append([10 * ' ' + ' ▲ ', span * ' ', '\n'])
         # draw the curve
         for i in range(curve.size-1):
             prev = quant[i]
@@ -124,8 +147,7 @@ def curve2str(curve, divisor, span, is_global, is_elastic, x_title='x', y_title=
             if prev > curr:
                 grid[prev - 1][1] = grid[prev - 1][1][:i] + line_type['descent'] + grid[prev - 1][1][i + 1:]
                 for j in range(1, prev - curr):
-                    grid[prev - 1 - j][1] = grid[prev - 1 - j][1][:i] + line_type['vertical'] + grid[prev - 1 - j][1][
-                                                                                                i + 1:]
+                    grid[prev - 1 - j][1] = grid[prev - 1 - j][1][:i] + line_type['vertical'] + grid[prev - 1 - j][1][i + 1:]
             elif prev < curr:
                 grid[prev][1] = grid[prev][1][:i] + line_type['ascent'] + grid[prev][1][i + 1:]
                 for j in range(1, curr - prev):
@@ -158,8 +180,8 @@ def curve2str(curve, divisor, span, is_global, is_elastic, x_title='x', y_title=
 
 def join_imgs(imgs, nrow, ncol):
     N, H, W, C = imgs.shape
-    assert N == nrow*ncol, 'NEBULAE ERROR ៙ the number of images does not match cells.'
-    assert N > 1, 'NEBULAE ERROR ៙ one image does not need to be pieced together.'
+    assert N == nrow*ncol, 'TCURVE ERROR ៙ the number of images does not match cells.'
+    assert N > 1, 'TCURVE ERROR ៙ one image does not need to be pieced together.'
     margin_h = max(1, H//20)
     margin_w = max(1, W//20)
     canvas = np.zeros((margin_h*(nrow+1) + H*nrow, margin_w*(ncol+1) + W*ncol, C))
@@ -254,8 +276,9 @@ def _get_color_wheel(bins=None):
 
 
 def plot_in_one(crv_names, crv_files, dst_path):
-    assert len(crv_names)==len(crv_files), 'NEBULAE ERROR ៙ the number of files does not match names.'
-    assert len(crv_names) > 1, 'NEBULAE ERROR ៙ one curve does not need to be drawn together.'
+    assert len(crv_names)==len(crv_files), 'TCURVE ERROR ៙ the number of files does not match names.'
+    assert len(crv_names) > 1, 'TCURVE ERROR ៙ one curve does not need to be drawn together.'
+    plt, pd = _import_plotting_deps()
     palette = ['#F08080', '#00BFFF', '#FFFF00', '#2E8B57', '#6A5ACD', '#FFD700', '#808080']
     i = 0
     for n, f in zip(crv_names, crv_files):
