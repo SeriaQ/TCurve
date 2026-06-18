@@ -30,6 +30,10 @@ PERCENT = 1
 INVIZ = 2
 IMAGE = 3
 CUSTOM = 4
+SERIES = 10
+METRIC = 11
+STAGE = 12
+NOTHING = 13
 
 
 def _import_logging_deps():
@@ -2266,6 +2270,45 @@ class Dash(object):
             )
         return trail[:length], gauge[:length]
 
+    def _is_scalar_metric(self, metric_id):
+        entry = metric_id[1]
+        if self.metrics is None or entry not in self.metrics:
+            return True
+        return self.metrics[entry][1] in (RAW, PERCENT)
+
+    def _select_plot_metric_ids(self, select):
+        metric_ids = [metric_id for metric_id in sorted(self.gauge_mile.keys()) if self._is_scalar_metric(metric_id)]
+        if select is None:
+            return metric_ids
+        selected = []
+        available = set(metric_ids)
+        known = set(self.gauge_mile.keys())
+        for metric_id in select:
+            parsed = self._parse_metric_label(metric_id)
+            if parsed not in known:
+                raise ValueError('TCURVE ERROR ៙ selected curve %s has no mile series.' % self._metric_label(parsed))
+            if parsed not in available:
+                raise ValueError('TCURVE ERROR ៙ selected curve %s is not a scalar metric and cannot be plotted.' % self._metric_label(parsed))
+            selected.append(parsed)
+        return selected
+
+    def _plot_group_key(self, metric_id, group_by):
+        stage, metric = metric_id
+        if group_by == SERIES:
+            return metric_id
+        if group_by == METRIC:
+            return metric
+        if group_by == STAGE:
+            return stage
+        if group_by == NOTHING:
+            return 'all'
+        raise ValueError('TCURVE ERROR ៙ "group_by" must be SERIES, METRIC, STAGE, or NOTHING.')
+
+    def _plot_group_token(self, group_key):
+        if isinstance(group_key, tuple):
+            return '%s_%s' % (self._metric_token(group_key[1]), self._metric_token(group_key[0]))
+        return self._metric_token(group_key)
+
     def prepend_history(self, history):
         history = os.path.abspath(os.path.expanduser(history))
         series = self._read_history_dir(history)
@@ -2332,67 +2375,68 @@ class Dash(object):
                 df = pd.DataFrame(data={'epoch': epoch_x, label: epoch_y})
                 df.to_csv(os.path.join(log_dir, '%s_%s_epoch.csv' % (metric_token, stage_token)), index=None)
 
-    def plot_curves(self, subdir='', base_path=None):
-        plt, pd, sns = _import_logging_deps()
+    def plot_curves(self, subdir='', base_path=None, select=None, group_by=METRIC):
         log_dir = self._resolve_log_dir(subdir, base_path=base_path)
         boards = {}
-        for metric_id in self.gauge_mile.keys():
-            entry = metric_id[1]
-            if self.metrics is not None and entry in self.metrics and self.metrics[entry][1] in (INVIZ, IMAGE, CUSTOM):
-                continue
-            boards.setdefault(entry, []).append(metric_id)
+        for metric_id in self._select_plot_metric_ids(select):
+            boards.setdefault(self._plot_group_key(metric_id, group_by), []).append(metric_id)
+        if not boards:
+            return
+        plt, pd, sns = _import_logging_deps()
         sns.set_theme()
-        for entry, metric_ids in boards.items():
+        for group_key, metric_ids in boards.items():
+            fig = plt.figure()
+            ax = fig.add_subplot(111)
+            plotted = False
+            mile_tail = 0
+            last_value = 0
             for metric_id in metric_ids:
-                if len(self.gauge_mile[metric_id]) == 0:
+                mile_x, mile_y = self._aligned_series('mile', metric_id)
+                if not mile_y:
                     continue
-                stage, metric = metric_id
-                trail = self.trail_mile[metric_id]
-                fig = plt.figure()
-                ax = fig.add_subplot(111)
-                ymin, ymax, xmin, xmax = self._argm(self.gauge_mile[metric_id])
-                xoff = max(len(trail), 1) * 0.02
+                entry = metric_id[1]
+                ymin, ymax, xmin, xmax = self._argm(mile_y)
+                xoff = max(len(mile_x), 1) * 0.02
                 yoff = (ymax - ymin) * 0.02
-                x_min = trail[xmin - 1]
-                x_max = trail[xmax - 1]
+                x_min = mile_x[xmin - 1]
+                x_max = mile_x[xmax - 1]
                 ax.annotate(self._format_logged_value(entry, ymin), (x_min - xoff, ymin + yoff))
                 ax.annotate(self._format_logged_value(entry, ymax), (x_max - xoff, ymax + yoff))
-                data = pd.DataFrame({self._metric_label(metric_id): self.gauge_mile[metric_id]}, index=trail)
+                data = pd.DataFrame({self._metric_label(metric_id): mile_y}, index=mile_x)
                 sns.lineplot(data=data, markers=False, ax=ax)
+                plotted = True
+                mile_tail = max(mile_tail, mile_x[-1])
+                last_value = mile_y[-1]
+            if plotted:
                 plt.savefig(os.path.join(
                     log_dir,
-                    '%s_%s_%.3g_mile_%d.jpg' % (
-                        self._metric_token(metric),
-                        self._metric_token(stage),
-                        self.gauge_mile[metric_id][-1],
-                        trail[-1],
-                    ),
+                    '%s_%.3g_mile_%d.jpg' % (self._plot_group_token(group_key), last_value, mile_tail),
                 ))
-                plt.close()
+            plt.close()
 
-        for entry, metric_ids in boards.items():
+        for group_key, metric_ids in boards.items():
             fig = plt.figure()
             ax = fig.add_subplot(111)
             plotted = False
             epoch_tail = 0
             for metric_id in metric_ids:
-                if len(self.gauge_epoch[metric_id]) == 0:
+                epoch_x, epoch_y = self._aligned_series('epoch', metric_id)
+                if not epoch_y:
                     continue
-                stage, _ = metric_id
-                trail = self.trail_epoch[metric_id]
-                ymin, ymax, xmin, xmax = self._argm(self.gauge_epoch[metric_id])
-                xoff = max(len(trail), 1) * 0.02
+                ymin, ymax, xmin, xmax = self._argm(epoch_y)
+                xoff = max(len(epoch_x), 1) * 0.02
                 yoff = (ymax - ymin) * 0.02
-                x_min = trail[xmin - 1]
-                x_max = trail[xmax - 1]
+                x_min = epoch_x[xmin - 1]
+                x_max = epoch_x[xmax - 1]
+                entry = metric_id[1]
                 ax.annotate(self._format_logged_value(entry, ymin), (x_min - xoff, ymin + yoff))
                 ax.annotate(self._format_logged_value(entry, ymax), (x_max - xoff, ymax + yoff))
-                data = pd.DataFrame({self._metric_label(metric_id): np.asarray(self.gauge_epoch[metric_id])}, index=trail)
+                data = pd.DataFrame({self._metric_label(metric_id): np.asarray(epoch_y)}, index=epoch_x)
                 sns.lineplot(data=data, markers=True, ax=ax)
                 plotted = True
-                epoch_tail = max(epoch_tail, trail[-1])
+                epoch_tail = max(epoch_tail, epoch_x[-1])
             if plotted:
-                plt.savefig(os.path.join(log_dir, '%s_epoch_%d.jpg' % (self._metric_token(entry), max(self.max_epoch, epoch_tail))))
+                plt.savefig(os.path.join(log_dir, '%s_epoch_%d.jpg' % (self._plot_group_token(group_key), max(self.max_epoch, epoch_tail))))
             plt.close()
 
     def log(self, subdir=''):

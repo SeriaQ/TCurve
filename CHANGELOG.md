@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1
+
+- Add flexible plot export with `select` and `group_by`, using `SERIES`, `METRIC`, `STAGE`, and `NOTHING`.
+- Add `log(subdir=...)` as a shortcut for saving curve plots and CSV files.
+- Add `prepend_history` and `compare_history` for loading previous CSV exports.
+- Improve fullscreen split view controls for comparing two metrics.
+- Improve fullscreen resource monitoring display with CPU, memory, GPU utilization, GPU temperature, and VRAM bars.
+- Improve inline epoch summary rendering so previous epoch summaries remain visible.
+- Validate terminal bounds for `span` and `divisor`, and block split view when `span` is too wide.
+- Add up/down arrow key support for navigation.
+- Document fullscreen controls, resource monitoring, history loading, plot export, and local tests.
+
 ## 0.2.0
 
 - Rename the metric configuration argument from `format` to `metrics`.

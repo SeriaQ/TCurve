@@ -863,6 +863,74 @@ class DashLoggingTests(QuietOutputMixin, unittest.TestCase):
             self.skipTest(str(exc))
         self.assertTrue(os.listdir(os.path.join(work, 'plots')))
 
+    def test_plot_curves_uses_aligned_epoch_series(self):
+        work = tempfile.mkdtemp(prefix='tcurve-plots-aligned-')
+        dash = tc.Dash(log_dir=work, metrics={'loss': ['.2f', tc.RAW]})
+        metric_id = ('TRAIN', 'loss')
+        dash._ensure_metric_storage(metric_id)
+        dash.gauge_mile[metric_id] = [1.0]
+        dash.trail_mile[metric_id] = [1]
+        dash.gauge_epoch[metric_id] = [1.0]
+        dash.trail_epoch[metric_id] = []
+
+        fig = mock.Mock()
+        fig.add_subplot.return_value = mock.Mock()
+        fake_plt = mock.Mock()
+        fake_plt.figure.return_value = fig
+        fake_pd = mock.Mock()
+        fake_pd.DataFrame.side_effect = lambda *args, **kwargs: {'args': args, 'kwargs': kwargs}
+        fake_sns = mock.Mock()
+
+        with mock.patch('tcurve.dash._import_logging_deps', return_value=(fake_plt, fake_pd, fake_sns)):
+            dash.plot_curves(subdir='plots')
+
+        self.assertEqual(fake_sns.lineplot.call_count, 1)
+
+    def test_plot_curves_supports_selection_and_grouping_macros(self):
+        work = tempfile.mkdtemp(prefix='tcurve-plots-group-')
+        dash = tc.Dash(log_dir=work, metrics={'loss': ['.2f', tc.RAW], 'acc': ['.1f', tc.PERCENT]})
+        for metric_id, values in {
+            ('TRAIN', 'loss'): [1.0, 0.8],
+            ('VAL', 'loss'): [1.2, 0.9],
+            ('TRAIN', 'acc'): [0.5, 0.7],
+        }.items():
+            dash._ensure_metric_storage(metric_id)
+            dash.gauge_mile[metric_id] = values
+            dash.trail_mile[metric_id] = [1, 2]
+
+        fake_plt = mock.Mock()
+        fake_plt.figure.return_value.add_subplot.return_value = mock.Mock()
+        fake_pd = mock.Mock()
+        fake_pd.DataFrame.side_effect = lambda *args, **kwargs: {'args': args, 'kwargs': kwargs}
+        fake_sns = mock.Mock()
+
+        with mock.patch('tcurve.dash._import_logging_deps', return_value=(fake_plt, fake_pd, fake_sns)):
+            dash.plot_curves(subdir='plots', select=[('TRAIN', 'loss'), ('TRAIN', 'acc')], group_by=tc.NOTHING)
+
+        saved = [os.path.basename(call.args[0]) for call in fake_plt.savefig.call_args_list]
+        self.assertEqual(saved, ['all_0.7_mile_2.jpg'])
+        self.assertEqual(fake_sns.lineplot.call_count, 2)
+
+        fake_plt.reset_mock()
+        fake_sns.reset_mock()
+        with mock.patch('tcurve.dash._import_logging_deps', return_value=(fake_plt, fake_pd, fake_sns)):
+            dash.plot_curves(subdir='plots', select=[('TRAIN', 'loss'), ('VAL', 'loss')], group_by=tc.METRIC)
+
+        saved = [os.path.basename(call.args[0]) for call in fake_plt.savefig.call_args_list]
+        self.assertEqual(saved, ['loss_0.9_mile_2.jpg'])
+        self.assertEqual(fake_sns.lineplot.call_count, 2)
+
+    def test_plot_curves_rejects_explicit_non_scalar_metric(self):
+        work = tempfile.mkdtemp(prefix='tcurve-plots-nonscalar-')
+        dash = tc.Dash(log_dir=work, metrics={'img': [lambda *args: True, tc.IMAGE]})
+        metric_id = ('TRAIN', 'img')
+        dash._ensure_metric_storage(metric_id)
+        dash.gauge_mile[metric_id] = [1.0]
+        dash.trail_mile[metric_id] = [1]
+
+        with self.assertRaises(ValueError):
+            dash.plot_curves(select=[metric_id])
+
     def test_log_exports_plots_and_csv(self):
         dash = tc.Dash(metrics={'loss': ['.2f', tc.RAW]})
         observed = []

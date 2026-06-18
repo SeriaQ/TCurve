@@ -224,6 +224,14 @@ tcd.log(subdir='run_demo')
 
 `log(subdir='run_demo')` saves both curve plots and CSV files under `log_dir/run_demo`. If you need only one kind of output, call `plot_curves(subdir=...)` or `export_csv(subdir=...)` directly.
 
+`plot_curves` can choose exact curves with `(stage, metric)` pairs and group them with `SERIES`, `METRIC`, `STAGE`, or `NOTHING`. Non-scalar metrics such as `IMAGE`, `INVIZ`, and `CUSTOM` are not plotted.
+
+```python
+tcd.plot_curves(select=[('TRAIN', 'Loss')], group_by=tc.SERIES)
+tcd.plot_curves(select=[('TRAIN', 'Loss'), ('VAL', 'Loss')], group_by=tc.METRIC)
+tcd.plot_curves(select=[('TRAIN', 'Loss'), ('TRAIN', 'Acc')], group_by=tc.NOTHING)
+```
+
 CSV files are named by metric, stage, and unit, such as `Loss_TRAIN_mile.csv` and `Loss_TRAIN_epoch.csv`. Plot files are saved as `.jpg`.
 
 You can load old CSV exports before or during a new run.
@@ -263,8 +271,6 @@ The following libs are installed as package dependencies.
 For terminal image preview, pass a 2D `numpy` array in `float16`, `float32`, or `uint8`.
 
 Optional: install `psutil` for cross-platform CPU and memory usage. On Linux, TCurve can also read CPU and memory from `/proc` without `psutil`. NVIDIA GPU usage is read from `nvidia-smi` when available; driver/NVML errors are shown in the resource panel.
-
-Release note: `metrics` is the metric configuration argument, and `log_dir` is the directory argument for metric logs and exports. Older examples using `format` or `log_way` should be updated.
 
 Optional: if you cloned the repository and want to run the unit tests locally, use:
 
