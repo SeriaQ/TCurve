@@ -200,6 +200,8 @@ dash = tc.Dash(metrics={'Loss': ['.3f', tc.RAW]}, resources=True)
 
 When you use fullscreen mode with a manually called `Dash`, use `with` or call `finalize()` after the loop so the final review screen is closed cleanly. The iterable wrapper handles this automatically.
 
+After a fullscreen run finishes, `finalize(review=True)` keeps the final dashboard interactive until you press `q`. Use `review=False` to close it immediately.
+
 ```python
 with tc.Dash(metrics={'Loss': ['.3f', tc.RAW]}, resources=True) as dash:
     for i, loss in enumerate(losses):

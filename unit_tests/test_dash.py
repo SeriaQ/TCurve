@@ -320,6 +320,42 @@ class DashDisplayModeTests(QuietOutputMixin, unittest.TestCase):
         self.assertFalse(dash.review_mode)
         self.assertFalse(dash._exit_review)
 
+    def test_finalize_inline_restores_cursor_once(self):
+        dash = self._make_dash_with_state()
+        dash.show = True
+        dash.display_mode = 'inline'
+        dash._is_interactive_terminal = lambda: True
+        dash._inline_rewind_lines = 7
+
+        dash.finalize(review=False)
+        dash.finalize(review=False)
+
+        self.assertEqual(self._stdout_buffer.getvalue(), '\033[7B')
+        self.assertEqual(dash._inline_rewind_lines, 0)
+
+    def test_finalize_inline_wipe_output_adds_newline(self):
+        dash = self._make_dash_with_state()
+        dash.show = True
+        dash.display_mode = 'inline'
+        dash._is_interactive_terminal = lambda: True
+        dash._inline_needs_newline = True
+
+        dash.finalize(review=False)
+
+        self.assertEqual(self._stdout_buffer.getvalue(), '\n')
+
+    def test_finalize_without_review_exits_fullscreen(self):
+        dash = self._make_dash_with_state()
+        dash.show = True
+        dash.display_mode = 'fullscreen'
+        dash._fullscreen_active = True
+        dash._is_interactive_terminal = lambda: True
+
+        dash.finalize(review=False)
+
+        self.assertEqual(dash.display_mode, 'inline')
+        self.assertIn('\033[?1049l', self._stdout_buffer.getvalue())
+
     def test_finalize_fullscreen_enters_review_loop_setup(self):
         dash = self._make_dash_with_state()
         dash.display_mode = 'fullscreen'

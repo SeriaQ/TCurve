@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+- Fix inline finalization so subsequent terminal output does not overwrite epoch summaries.
+- Ensure `finalize(review=False)` exits fullscreen immediately and still restores terminal output state.
+- Document fullscreen review mode and the `review` option of `finalize()`.
+- Refresh the package banner and remove its invalid escape sequence warning.
+- Fix package discovery and include the build metadata and changelog in source distributions.
+
 ## 0.2.1
 
 - Add flexible plot export with `select` and `group_by`, using `SERIES`, `METRIC`, `STAGE`, and `NOTHING`.

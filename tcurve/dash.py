@@ -140,6 +140,8 @@ class Dash(object):
         self._restore_registered = False
         self._fullscreen_active = False
         self._last_frame_state = None
+        self._inline_rewind_lines = 0
+        self._inline_needs_newline = False
         self.review_mode = False
         self._exit_review = False
 
@@ -1597,6 +1599,8 @@ class Dash(object):
                 print(summary_line)
         rewind_lines = 0
         if wipe:
+            self._inline_rewind_lines = 0
+            self._inline_needs_newline = True
             stdout.flush()
         else:
             if state['curve']:
@@ -1605,6 +1609,20 @@ class Dash(object):
                 rewind_lines = state['image_rows'] + 1 + len(summary_lines)
             stdout.write(f"\033[{rewind_lines}A")
             stdout.flush()
+            self._inline_rewind_lines = rewind_lines
+            self._inline_needs_newline = False
+
+    def _finish_inline(self):
+        if not self._inline_rewind_lines and not self._inline_needs_newline:
+            return
+        if self._is_interactive_terminal():
+            if self._inline_rewind_lines:
+                stdout.write(f"\033[{self._inline_rewind_lines}B")
+            elif self._inline_needs_newline:
+                stdout.write('\n')
+            stdout.flush()
+        self._inline_rewind_lines = 0
+        self._inline_needs_newline = False
 
     def _current_view_flags(self, base_state=None):
         return self._current_view_flags_for_side('left', base_state)
@@ -2022,10 +2040,16 @@ class Dash(object):
         self._render_last_state()
 
     def finalize(self, review=True):
-        if not review or not self.show or not self._is_interactive_terminal() or self._last_frame_state is None:
+        if not self.show or self._last_frame_state is None:
             return
         if self.display_mode != 'fullscreen':
             self._clear_action_ui()
+            self._finish_inline()
+            return
+        if not review or not self._is_interactive_terminal():
+            self._clear_action_ui()
+            self._set_display_mode('inline')
+            self._finish_inline()
             return
         self._start_review_mode()
         while not self._exit_review:
@@ -2033,6 +2057,7 @@ class Dash(object):
             time.sleep(0.05)
         self.review_mode = False
         self._exit_review = False
+        self._finish_inline()
 
     def __enter__(self):
         return self
