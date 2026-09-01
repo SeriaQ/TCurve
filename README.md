@@ -202,6 +202,8 @@ When you use fullscreen mode with a manually called `Dash`, use `with` or call `
 
 After a fullscreen run finishes, `finalize(review=True)` keeps the final dashboard interactive until you press `q`. Use `review=False` to close it immediately.
 
+`finalize()` stops keyboard monitoring and restores the terminal input mode. A force-killed process cannot run cleanup; if the terminal no longer echoes input after `kill -9`, run `stty sane`.
+
 ```python
 with tc.Dash(metrics={'Loss': ['.3f', tc.RAW]}, resources=True) as dash:
     for i, loss in enumerate(losses):

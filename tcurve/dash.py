@@ -489,6 +489,15 @@ class Dash(object):
         self._stdin_fd = None
         self._stdin_attrs = None
 
+    def _stop_input_listener(self):
+        self._input_stop.set()
+        thread = self._input_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=0.2)
+        self._input_thread = None
+        self._input_listener_started = False
+        self._restore_input_mode()
+
     def _ensure_input_listener(self):
         if self._input_listener_started or not self.show or not self._is_interactive_terminal():
             return
@@ -513,15 +522,16 @@ class Dash(object):
             self._pending_keys.append(key)
 
     def _input_loop(self):
-        while not self._input_stop.is_set() and self._stdin_fd is not None:
+        fd = self._stdin_fd
+        while not self._input_stop.is_set() and fd is not None:
             try:
-                ready, _, _ = select.select([self._stdin_fd], [], [], 0.1)
+                ready, _, _ = select.select([fd], [], [], 0.1)
             except (OSError, ValueError):
                 break
             if not ready:
                 continue
             try:
-                key = os.read(self._stdin_fd, 1).decode(errors='ignore')
+                key = os.read(fd, 1).decode(errors='ignore')
             except OSError:
                 break
             if key:
@@ -2040,24 +2050,30 @@ class Dash(object):
         self._render_last_state()
 
     def finalize(self, review=True):
-        if not self.show or self._last_frame_state is None:
-            return
-        if self.display_mode != 'fullscreen':
-            self._clear_action_ui()
-            self._finish_inline()
-            return
-        if not review or not self._is_interactive_terminal():
-            self._clear_action_ui()
-            self._set_display_mode('inline')
-            self._finish_inline()
-            return
-        self._start_review_mode()
-        while not self._exit_review:
-            self._process_pending_input()
-            time.sleep(0.05)
-        self.review_mode = False
-        self._exit_review = False
-        self._finish_inline()
+        try:
+            if not self.show:
+                return
+            if self._last_frame_state is None:
+                return
+            if self.display_mode != 'fullscreen':
+                self._clear_action_ui()
+                return
+            if not review or not self._is_interactive_terminal():
+                self._clear_action_ui()
+                return
+            self._start_review_mode()
+            while not self._exit_review:
+                self._process_pending_input()
+                time.sleep(0.05)
+        finally:
+            try:
+                if self.display_mode == 'fullscreen':
+                    self._set_display_mode('inline')
+                self.review_mode = False
+                self._exit_review = False
+                self._finish_inline()
+            finally:
+                self._stop_input_listener()
 
     def __enter__(self):
         return self

@@ -320,6 +320,52 @@ class DashDisplayModeTests(QuietOutputMixin, unittest.TestCase):
         self.assertFalse(dash.review_mode)
         self.assertFalse(dash._exit_review)
 
+    def test_stop_input_listener_joins_thread_and_restores_mode(self):
+        dash = self._make_dash_with_state()
+        thread = mock.Mock()
+        dash._input_thread = thread
+        dash._input_listener_started = True
+        dash._restore_input_mode = mock.Mock()
+
+        with mock.patch('tcurve.dash.threading.current_thread', return_value=object()):
+            dash._stop_input_listener()
+
+        self.assertTrue(dash._input_stop.is_set())
+        thread.join.assert_called_once_with(timeout=0.2)
+        dash._restore_input_mode.assert_called_once_with()
+        self.assertIsNone(dash._input_thread)
+        self.assertFalse(dash._input_listener_started)
+
+    def test_finalize_without_frame_still_stops_input_listener(self):
+        dash = self._make_dash_with_state()
+        dash.show = True
+        dash._last_frame_state = None
+        dash._stop_input_listener = mock.Mock()
+
+        dash.finalize()
+
+        dash._stop_input_listener.assert_called_once_with()
+
+    def test_finalize_hidden_dash_still_stops_input_listener(self):
+        dash = self._make_dash_with_state()
+        dash._stop_input_listener = mock.Mock()
+
+        dash.finalize()
+
+        dash._stop_input_listener.assert_called_once_with()
+
+    def test_finalize_stops_input_listener_when_cleanup_fails(self):
+        dash = self._make_dash_with_state()
+        dash.show = True
+        dash.display_mode = 'inline'
+        dash._finish_inline = mock.Mock(side_effect=RuntimeError('cleanup failed'))
+        dash._stop_input_listener = mock.Mock()
+
+        with self.assertRaises(RuntimeError):
+            dash.finalize()
+
+        dash._stop_input_listener.assert_called_once_with()
+
     def test_finalize_inline_restores_cursor_once(self):
         dash = self._make_dash_with_state()
         dash.show = True
@@ -355,6 +401,26 @@ class DashDisplayModeTests(QuietOutputMixin, unittest.TestCase):
 
         self.assertEqual(dash.display_mode, 'inline')
         self.assertIn('\033[?1049l', self._stdout_buffer.getvalue())
+
+    def test_finalize_keyboard_interrupt_exits_fullscreen_and_restores_input(self):
+        dash = self._make_dash_with_state()
+        dash.show = True
+        dash.display_mode = 'fullscreen'
+        dash._fullscreen_active = True
+        dash._is_interactive_terminal = lambda: True
+        dash._start_review_mode = lambda: setattr(dash, 'review_mode', True)
+        dash._process_pending_input = mock.Mock(side_effect=KeyboardInterrupt)
+        dash._stop_input_listener = mock.Mock()
+
+        with self.assertRaises(KeyboardInterrupt):
+            dash.finalize(review=True)
+
+        self.assertEqual(dash.display_mode, 'inline')
+        self.assertFalse(dash._fullscreen_active)
+        self.assertFalse(dash.review_mode)
+        self.assertFalse(dash._exit_review)
+        self.assertIn('\033[?1049l', self._stdout_buffer.getvalue())
+        dash._stop_input_listener.assert_called_once_with()
 
     def test_finalize_fullscreen_enters_review_loop_setup(self):
         dash = self._make_dash_with_state()

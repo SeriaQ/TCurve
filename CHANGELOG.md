@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3
+
+- Stop the keyboard listener and restore terminal input mode during finalization.
+- Restore the normal terminal screen when fullscreen review is interrupted.
+- Document terminal recovery after a force-killed process.
+
 ## 0.2.2
 
 - Fix inline finalization so subsequent terminal output does not overwrite epoch summaries.
