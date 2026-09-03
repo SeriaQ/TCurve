@@ -1594,11 +1594,14 @@ class Dash(object):
             print(state['char_image'])
         print(state['width'] * ' ', end='\r')
         end_char = '\r' if wipe else '\n'
+        view_line = ''
+        if not wipe:
+            view_line = state.get('inline_view_line', '')
+        if view_line and self.review_mode:
+            view_line += ' | Review[q]: active'
+        if view_line:
+            print(self._fit_visible(view_line, state['width']))
         line = state.get('status_line_inline', state['status_line'])
-        if self._is_interactive_terminal():
-            line += ' [s fullscreen]'
-            if self.review_mode:
-                line += ' [q quit]'
         print(line, end=end_char)
         summary_lines = []
         if not wipe:
@@ -1614,9 +1617,9 @@ class Dash(object):
             stdout.flush()
         else:
             if state['curve']:
-                rewind_lines = state['curve_rows'] + flush + state['image_rows'] + 2 + len(summary_lines)
+                rewind_lines = state['curve_rows'] + flush + state['image_rows'] + 2 + len(summary_lines) + int(bool(view_line))
             else:
-                rewind_lines = state['image_rows'] + 1 + len(summary_lines)
+                rewind_lines = state['image_rows'] + 1 + len(summary_lines) + int(bool(view_line))
             stdout.write(f"\033[{rewind_lines}A")
             stdout.flush()
             self._inline_rewind_lines = rewind_lines
@@ -1716,15 +1719,9 @@ class Dash(object):
             pre_bar = progress * ' '
             yellow_bar = ' '
             space_bar = (19 - progress) * ' '
-        mode_badge = '[%s %s %s]' % (
-            self.display_mode,
-            'global' if state['view_is_global'] else 'recent',
-            'elastic' if state['view_is_elastic'] else 'fixed',
-        )
-        status_suffix = mode_badge if self.display_mode == 'inline' else ''
         string_mile = state.get('string_mile', '')
         duration = state['duration']
-        status_line_inline = '| %d%s Epoch ⚘ %d Miles ≺[%s[43m%s[0m%s]≻ ₪ %ss/mile | %s |%s %s     ' % (
+        status_line_inline = '| %d%s Epoch ⚘ %d Miles ≺[%s[43m%s[0m%s]≻ ₪ %ss/mile | %s |%s     ' % (
             epoch,
             state['ordinal'],
             mile,
@@ -1734,7 +1731,6 @@ class Dash(object):
             duration,
             state['stage'],
             string_mile,
-            status_suffix,
         )
         status_line_fullscreen = '| %d%s Epoch ⚘ %d Miles ≺[%s[43m%s[0m%s]≻ ₪ %ss/mile | %s |%s     ' % (
             epoch,
@@ -1813,6 +1809,10 @@ class Dash(object):
         state['status_line'] = status_line_inline
         state['status_line_inline'] = status_line_inline
         state['status_line_fullscreen'] = status_line_fullscreen
+        state['inline_view_line'] = 'View[s]: inline | Range[g]: %s | Y-axis[e]: %s' % (
+            'global' if state['view_is_global'] else 'recent',
+            'elastic' if state['view_is_elastic'] else 'fixed',
+        )
         return state
 
     def _refresh_frame_state(self, base_state):

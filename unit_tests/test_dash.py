@@ -439,11 +439,22 @@ class DashDisplayModeTests(QuietOutputMixin, unittest.TestCase):
         metric_id = dash._select_inline_metric([('TRAIN', 'acc'), ('TRAIN', 'loss')], mile=10, interv=1, in_loop=(0, 1), last_for=1)
         self.assertEqual(metric_id, ('TRAIN', 'loss'))
 
-    def test_status_line_includes_mode_badge(self):
+    def test_inline_view_state_precedes_progress_line(self):
         dash = tc.Dash(metrics={'loss': ['.2f', tc.RAW]})
         with redirect_stdout(io.StringIO()):
             dash({'loss': 1.0}, 0, 0, 3, stage='TRAIN', plot=False)
-        self.assertIn('[inline global fixed]', dash._last_frame_state['status_line'])
+        self.assertNotIn('[inline global fixed]', dash._last_frame_state['status_line'])
+        self.assertEqual(dash._last_frame_state['inline_view_line'], 'View[s]: inline | Range[g]: global | Y-axis[e]: fixed')
+
+        self._stdout_buffer.seek(0)
+        self._stdout_buffer.truncate(0)
+        dash._is_interactive_terminal = lambda: True
+        dash._render_inline(dash._last_frame_state)
+
+        output = self._stdout_buffer.getvalue()
+        self.assertIn('View[s]: inline | Range[g]: global | Y-axis[e]: fixed', output)
+        self.assertLess(output.index('View[s]'), output.index('| 1st Epoch'))
+        self.assertEqual(dash._inline_rewind_lines, 2)
 
     def test_fullscreen_status_line_preserves_colored_progress_bar(self):
         dash = tc.Dash(metrics={'loss': ['.2f', tc.RAW]})

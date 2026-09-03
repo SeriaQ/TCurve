@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.4
+
+- Move inline view state above the progress line and label each control with its shortcut key.
+
 ## 0.2.3
 
 - Stop the keyboard listener and restore terminal input mode during finalization.
