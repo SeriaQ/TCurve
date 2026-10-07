@@ -8,7 +8,6 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 import tcurve as tc
-import tcurve.dash as dash_module
 from tcurve.resources import ResourceMonitor
 from tcurve.utils import curve2str
 
@@ -18,17 +17,14 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 class QuietOutputMixin:
     def setUp(self):
-        self._stdout = dash_module.stdout
         self._stdout_buffer = io.StringIO()
         self._stderr_buffer = io.StringIO()
         self._redirect_stdout = redirect_stdout(self._stdout_buffer)
         self._redirect_stderr = redirect_stderr(self._stderr_buffer)
         self._redirect_stdout.__enter__()
         self._redirect_stderr.__enter__()
-        dash_module.stdout = self._stdout_buffer
 
     def tearDown(self):
-        dash_module.stdout = self._stdout
         self._redirect_stderr.__exit__(None, None, None)
         self._redirect_stdout.__exit__(None, None, None)
 
@@ -455,6 +451,73 @@ class DashDisplayModeTests(QuietOutputMixin, unittest.TestCase):
         self.assertIn('View[s]: inline | Range[g]: global | Y-axis[e]: fixed', output)
         self.assertLess(output.index('View[s]'), output.index('| 1st Epoch'))
         self.assertEqual(dash._inline_rewind_lines, 2)
+
+    def test_inline_redraw_clears_previous_taller_frame(self):
+        dash = self._make_dash_with_state()
+        tall_state = dict(dash._last_frame_state)
+        tall_state['epoch_summaries'] = ['old %d' % i for i in range(6)]
+        dash._render_inline(tall_state)
+
+        self._stdout_buffer.seek(0)
+        self._stdout_buffer.truncate(0)
+        short_state = dict(dash._last_frame_state)
+        short_state['epoch_summaries'] = []
+        dash._render_inline(short_state)
+
+        self.assertTrue(self._stdout_buffer.getvalue().startswith('\033[J'))
+
+    def test_inline_limits_epoch_summaries_to_terminal_height(self):
+        dash = self._make_dash_with_state()
+        state = dict(dash._last_frame_state)
+        state.update({
+            'curve': '\n'.join('curve %d' % i for i in range(16)) + '\n',
+            'curve_rows': 16,
+            'epoch_summaries': ['epoch %d' % i for i in range(12)],
+            'height': 40,
+            'inline_view_line': 'View[s]: inline',
+        })
+
+        dash._render_inline(state)
+
+        output = self._stdout_buffer.getvalue()
+        self.assertLess(dash._inline_rewind_lines, state['height'])
+        self.assertNotIn('epoch 5', output)
+        self.assertIn('epoch 6', output)
+        self.assertIn('epoch 11', output)
+
+    def test_inline_fits_every_rendered_line_to_terminal_width(self):
+        dash = self._make_dash_with_state()
+        state = dict(dash._last_frame_state)
+        state.update({
+            'curve': 'c' * 40 + '\n',
+            'curve_rows': 1,
+            'char_image': 'i' * 40 + '\n',
+            'image_rows': 2,
+            'epoch_summaries': ['summary ' + 's' * 40],
+            'height': 40,
+            'inline_view_line': 'View[s]: ' + 'v' * 40,
+            'status_line': 'status ' + 'x' * 40,
+            'status_line_inline': 'status ' + 'x' * 40,
+            'width': 20,
+        })
+
+        dash._render_inline(state)
+
+        output = self._stdout_buffer.getvalue()
+        body = output[:-len('\033[%dA' % dash._inline_rewind_lines)]
+        for line in body.replace('\r', '\n').splitlines():
+            self.assertLessEqual(dash._display_width(line), state['width'])
+
+    def test_inline_writes_content_and_controls_to_redirected_stdout(self):
+        dash = self._make_dash_with_state()
+        target = io.StringIO()
+
+        with redirect_stdout(target):
+            dash._render_inline(dash._last_frame_state)
+
+        output = target.getvalue()
+        self.assertIn('status', output)
+        self.assertIn('\033[%dA' % dash._inline_rewind_lines, output)
 
     def test_fullscreen_status_line_preserves_colored_progress_bar(self):
         dash = tc.Dash(metrics={'loss': ['.2f', tc.RAW]})

@@ -11,7 +11,6 @@ import re
 import select
 import shutil
 import sys
-from sys import stdout
 import threading
 import time
 import unicodedata
@@ -550,12 +549,12 @@ class Dash(object):
             return False
         if self.show and self._is_interactive_terminal():
             if mode == 'fullscreen' and not self._fullscreen_active:
-                stdout.write('\033[?1049h\033[2J\033[H')
-                stdout.flush()
+                sys.stdout.write('\033[?1049h\033[2J\033[H')
+                sys.stdout.flush()
                 self._fullscreen_active = True
             elif mode == 'inline' and self._fullscreen_active:
-                stdout.write('\033[?1049l')
-                stdout.flush()
+                sys.stdout.write('\033[?1049l')
+                sys.stdout.flush()
                 self._fullscreen_active = False
         else:
             self._fullscreen_active = mode == 'fullscreen'
@@ -1584,44 +1583,85 @@ class Dash(object):
             lower_overlay = self._overlay_right_drawer(lower_lines, workspace_lines, width, drawer_width=workspace_width)
             output_lines = (upper_lines + lower_overlay)[:max_lines]
 
-        stdout.write('\033[H\033[2J' + '\n'.join(output_lines))
-        stdout.flush()
+        sys.stdout.write('\033[H\033[2J' + '\n'.join(output_lines))
+        sys.stdout.flush()
 
     def _render_inline(self, state, wipe=False, flush=0):
-        if state['curve']:
-            print(state['curve'])
-        if state['char_image']:
-            print(state['char_image'])
-        print(state['width'] * ' ', end='\r')
-        end_char = '\r' if wipe else '\n'
+        stream = sys.stdout
+        width = state['width']
         view_line = ''
         if not wipe:
             view_line = state.get('inline_view_line', '')
         if view_line and self.review_mode:
             view_line += ' | Review[q]: active'
-        if view_line:
-            print(self._fit_visible(view_line, state['width']))
-        line = state.get('status_line_inline', state['status_line'])
-        print(line, end=end_char)
+
+        image_text = state['char_image']
+        image_rows = state['image_rows'] if image_text else 0
         summary_lines = []
         if not wipe:
-            for display in state.get('epoch_summaries', []):
+            if state['curve']:
+                fixed_rows = state['curve_rows'] + flush + 2 + int(bool(view_line))
+            else:
+                fixed_rows = 1 + int(bool(view_line))
+            max_rows = max(1, state.get('height', 1) - 1)
+            if fixed_rows > max_rows:
+                raise ValueError(
+                    'TCURVE ERROR ៙ inline curve and status require %d rows, but the terminal allows %d; '
+                    'reduce "divisor" or "flush".' % (fixed_rows, max_rows)
+                )
+
+            image_budget = max_rows - fixed_rows
+            if image_rows > image_budget:
+                image_lines = image_text.rstrip('\n').splitlines()
+                image_rows = min(len(image_lines), image_budget)
+                image_text = '\n'.join(image_lines[:image_rows])
+
+            summary_budget = max_rows - fixed_rows - image_rows
+            summary_count = min(len(state.get('epoch_summaries', [])), summary_budget // 3)
+            summaries = state.get('epoch_summaries', [])[-summary_count:] if summary_count else []
+            for display in summaries:
                 border = '+' + max(1, self._display_width(display) - 2) * '-' + '+' + 30 * ' '
-                summary_lines.extend([border, display, border])
+                summary_lines.extend(
+                    self._fit_visible(summary_line, width) for summary_line in (border, display, border)
+                )
+
+        if self._inline_rewind_lines:
+            stream.write('\033[J')
+
+        if state['curve']:
+            curve_text = '\n'.join(
+                self._fit_visible(curve_line, width)
+                for curve_line in state['curve'].rstrip('\n').splitlines()
+            )
+            stream.write(curve_text + '\n\n')
+        if image_text:
+            image_had_trailing_newline = image_text.endswith('\n')
+            image_text = '\n'.join(
+                self._fit_visible(image_line, width)
+                for image_line in image_text.rstrip('\n').splitlines()
+            )
+            stream.write(image_text + ('\n\n' if image_had_trailing_newline else '\n'))
+        stream.write(width * ' ' + '\r')
+        end_char = '\r' if wipe else '\n'
+        if view_line:
+            stream.write(self._fit_visible(view_line, width) + '\n')
+        line = state.get('status_line_inline', state['status_line'])
+        stream.write(self._fit_visible(line, width) + end_char)
+        if not wipe:
             for summary_line in summary_lines:
-                print(summary_line)
+                stream.write(summary_line + '\n')
         rewind_lines = 0
         if wipe:
             self._inline_rewind_lines = 0
             self._inline_needs_newline = True
-            stdout.flush()
+            stream.flush()
         else:
             if state['curve']:
-                rewind_lines = state['curve_rows'] + flush + state['image_rows'] + 2 + len(summary_lines) + int(bool(view_line))
+                rewind_lines = state['curve_rows'] + flush + image_rows + 2 + len(summary_lines) + int(bool(view_line))
             else:
-                rewind_lines = state['image_rows'] + 1 + len(summary_lines) + int(bool(view_line))
-            stdout.write(f"\033[{rewind_lines}A")
-            stdout.flush()
+                rewind_lines = image_rows + 1 + len(summary_lines) + int(bool(view_line))
+            stream.write(f"\033[{rewind_lines}A")
+            stream.flush()
             self._inline_rewind_lines = rewind_lines
             self._inline_needs_newline = False
 
@@ -1630,10 +1670,10 @@ class Dash(object):
             return
         if self._is_interactive_terminal():
             if self._inline_rewind_lines:
-                stdout.write(f"\033[{self._inline_rewind_lines}B")
+                sys.stdout.write(f"\033[{self._inline_rewind_lines}B")
             elif self._inline_needs_newline:
-                stdout.write('\n')
-            stdout.flush()
+                sys.stdout.write('\n')
+            sys.stdout.flush()
         self._inline_rewind_lines = 0
         self._inline_needs_newline = False
 

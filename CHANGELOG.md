@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.5
+
+- Clear stale inline content when a shorter frame replaces a taller frame.
+- Keep inline frames within the terminal height by limiting epoch summaries and image rows.
+- Fit every inline output line to the terminal width to prevent unintended wrapping.
+- Route dashboard content and terminal control sequences through the current output stream.
+
 ## 0.2.4
 
 - Move inline view state above the progress line and label each control with its shortcut key.
