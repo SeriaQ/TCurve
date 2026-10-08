@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.6
+
+- Compute epoch averages from each metric's actual sample count, including unfinished epochs.
+- Add idempotent `end_epoch(stage=...)` and close unfinished epochs when the same stage starts a new epoch or the dashboard is finalized.
+- Mark early epoch summaries as partial and keep statistics independent across stages.
+- Fix rolling averages after early epoch termination and for intermittently reported metrics.
+- Show inline epoch summaries above the current curve, image, view controls, and progress line.
+- Document early epoch termination and the updated inline layout.
+
 ## 0.2.5
 
 - Clear stale inline content when a shorter frame replaces a taller frame.

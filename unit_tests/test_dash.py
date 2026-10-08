@@ -1,3 +1,4 @@
+import csv
 import io
 import numpy as np
 import os
@@ -858,6 +859,97 @@ class DashFormatTests(QuietOutputMixin, unittest.TestCase):
 
 
 class DashEpochSummaryTests(QuietOutputMixin, unittest.TestCase):
+    def test_partial_epoch_uses_actual_metric_counts_and_closes_once(self):
+        dash = tc.Dash(metrics={'loss': ['.2f', tc.RAW], 'acc': ['.1f', tc.PERCENT]})
+        dash({'loss': 2.0, 'acc': 0.5}, 0, 0, 10, stage='TRAIN', plot=False)
+        dash({'loss': 4.0}, 0, 1, 10, stage='TRAIN', plot=False)
+        self.assertEqual(dash.read('loss', 'TRAIN'), 3.0)
+        self.assertEqual(dash.read('acc', 'TRAIN'), 0.5)
+        dash.end_epoch(stage='TRAIN')
+        dash.end_epoch(stage='TRAIN')
+        self.assertEqual(len(dash.epoch_summaries), 1)
+        self.assertIn('partial 2/10', dash.epoch_summaries[0])
+        self.assertEqual(dash.trail_epoch[('TRAIN', 'loss')], [1])
+
+    def test_new_epoch_closes_previous_without_mixing_samples(self):
+        dash = tc.Dash(window=3, metrics={'loss': ['.2f', tc.RAW]})
+        dash({'loss': 2.0}, 0, 0, 10, stage='TRAIN', plot=False)
+        dash({'loss': 4.0}, 0, 1, 10, stage='TRAIN', plot=False)
+        dash({'loss': 6.0}, 1, 0, 10, stage='TRAIN', plot=False)
+        self.assertEqual(dash.gauge_epoch[('TRAIN', 'loss')], [3.0, 6.0])
+        self.assertEqual(dash.gauge_mile[('TRAIN', 'loss')][-1], 4.0)
+        self.assertEqual(len(dash.epoch_summaries), 1)
+        dash.finalize(review=False)
+        dash.finalize(review=False)
+        self.assertEqual(len(dash.epoch_summaries), 2)
+
+    def test_interleaved_stages_keep_independent_epoch_statistics(self):
+        dash = tc.Dash(metrics={'loss': ['.2f', tc.RAW]})
+        dash({'loss': 2.0}, 0, 0, 10, stage='TRAIN', plot=False)
+        dash({'loss': 8.0}, 0, 0, 10, stage='VAL', plot=False)
+        dash({'loss': 4.0}, 0, 1, 10, stage='TRAIN', plot=False)
+        self.assertEqual(len(dash.epoch_summaries), 0)
+        dash.end_epoch(stage='TRAIN')
+        self.assertIn('VAL', dash._active_epochs)
+        self.assertEqual(dash.read('loss', 'TRAIN'), 3.0)
+        self.assertEqual(dash.read('loss', 'VAL'), 8.0)
+
+    def test_complete_epoch_end_and_finalize_do_not_duplicate_summary(self):
+        dash = tc.Dash(metrics={'loss': ['.2f', tc.RAW]})
+        dash({'loss': 2.0}, 0, 0, 2, stage='TRAIN', plot=False)
+        dash({'loss': 4.0}, 0, 1, 2, stage='TRAIN', plot=False)
+        dash.end_epoch(stage='TRAIN')
+        dash.finalize(review=False)
+        self.assertEqual(dash.read('loss', 'TRAIN'), 3.0)
+        self.assertEqual(len(dash.epoch_summaries), 1)
+        self.assertNotIn('partial', dash.epoch_summaries[0])
+
+    def test_complete_epoch_includes_metric_absent_from_last_step(self):
+        dash = tc.Dash(metrics={'loss': ['.2f', tc.RAW], 'acc': ['.1f', tc.PERCENT]})
+        dash({'loss': 2.0, 'acc': 0.5}, 0, 0, 2, stage='TRAIN', plot=False)
+        dash({'loss': 4.0}, 0, 1, 2, stage='TRAIN', plot=False)
+        self.assertEqual(dash.read('acc', 'TRAIN'), 0.5)
+        self.assertIn('acc', dash.epoch_summaries[0])
+        self.assertEqual(dash.trail_epoch[('TRAIN', 'acc')], [1])
+
+    def test_context_exit_closes_early_epoch(self):
+        with tc.Dash(metrics={'loss': ['.2f', tc.RAW]}) as dash:
+            dash({'loss': 2.0}, 0, 0, 10, stage='TRAIN', plot=False)
+        self.assertEqual(len(dash.epoch_summaries), 1)
+        self.assertIn('partial 1/10', dash.epoch_summaries[0])
+        self.assertFalse(dash._active_epochs)
+
+    def test_partial_epoch_exports_matching_epoch_values_and_steps(self):
+        work = tempfile.mkdtemp(prefix='tcurve-partial-')
+        dash = tc.Dash(log_dir=work, metrics={'loss': ['.2f', tc.RAW]})
+        dash({'loss': 2.0}, 0, 0, 10, stage='TRAIN', plot=False)
+        dash({'loss': 4.0}, 0, 1, 10, stage='TRAIN', plot=False)
+        dash.end_epoch(stage='TRAIN')
+        dash.export_csv(subdir='out')
+        with open(os.path.join(work, 'out', 'loss_TRAIN_epoch.csv')) as exported:
+            rows = list(csv.DictReader(exported))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(float(rows[0]['epoch']), 1.0)
+        self.assertEqual(float(rows[0]['TRAIN:loss']), 3.0)
+        self.assertEqual(len(dash.gauge_epoch[('TRAIN', 'loss')]),
+                         len(dash.trail_epoch[('TRAIN', 'loss')]))
+
+    def test_inline_history_precedes_current_curve_and_progress(self):
+        dash = tc.Dash(metrics={'loss': ['.2f', tc.RAW]})
+        dash.epoch_summaries.extend(['old epoch 7', 'old epoch 8'])
+        state = {
+            'curve': 'current curve\n', 'curve_rows': 1,
+            'char_image': '', 'image_rows': 0, 'width': 100, 'height': 40,
+            'inline_view_line': 'View[s]: inline', 'status_line': 'current epoch 9',
+            'epoch_summaries': list(dash.epoch_summaries),
+        }
+        dash._render_inline(state)
+        output = self._stdout_buffer.getvalue()
+        self.assertLess(output.index('old epoch 7'), output.index('old epoch 8'))
+        self.assertLess(output.index('old epoch 8'), output.index('current curve'))
+        self.assertLess(output.index('current curve'), output.index('View[s]'))
+        self.assertLess(output.index('View[s]'), output.index('current epoch 9'))
+
     def test_image_persists_after_epoch_end(self):
         dash = tc.Dash(metrics={'img': [lambda value, epoch, mile, mpe, stage: True, tc.IMAGE]})
         arr = np.ones((4, 4), dtype=np.float32)

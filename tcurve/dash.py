@@ -104,6 +104,7 @@ class Dash(object):
         self.gauge_epoch = {}
         self.trail_mile = {}
         self.trail_epoch = {}
+        self._active_epochs = {}
         self.ptr = 0
         self.view_state = {
             'curve_view_global': None,
@@ -1628,6 +1629,9 @@ class Dash(object):
         if self._inline_rewind_lines:
             stream.write('\033[J')
 
+        for summary_line in summary_lines:
+            stream.write(summary_line + '\n')
+
         if state['curve']:
             curve_text = '\n'.join(
                 self._fit_visible(curve_line, width)
@@ -1647,9 +1651,6 @@ class Dash(object):
             stream.write(self._fit_visible(view_line, width) + '\n')
         line = state.get('status_line_inline', state['status_line'])
         stream.write(self._fit_visible(line, width) + end_char)
-        if not wipe:
-            for summary_line in summary_lines:
-                stream.write(summary_line + '\n')
         rewind_lines = 0
         if wipe:
             self._inline_rewind_lines = 0
@@ -2093,6 +2094,10 @@ class Dash(object):
         try:
             if not self.show:
                 return
+            if self._active_epochs:
+                for stage in list(self._active_epochs):
+                    self._close_epoch(stage)
+                self._render_last_state()
             if self._last_frame_state is None:
                 return
             if self.display_mode != 'fullscreen':
@@ -2188,8 +2193,19 @@ class Dash(object):
         known_mpe = mpe is not None and mpe > 0
         epoch += 1
         mile += 1
+        active = self._active_epochs.get(stage)
+        if active is not None and active['epoch'] != epoch:
+            self._close_epoch(stage)
+            active = None
+        if active is None:
+            active = {'epoch': epoch, 'mpe': mpe, 'mile': mile, 'started': time.time(),
+                      'metrics': {}, 'entry': {}}
+            if known_mpe:
+                self._active_epochs[stage] = active
+        active['mile'] = mile
+        active['mpe'] = mpe
+        active['entry'].update(entry)
         string_mile = ''
-        string_epoch = ''
         flag_display = False
         flag_epoch_end = False
         epoch_visible_count = 0
@@ -2209,8 +2225,6 @@ class Dash(object):
             if flag_display or self.metrics[abbr][1] == INVIZ:
                 string_mile += self._formatAsStr(stage, abbr, value, epoch, mile, mpe)
             if self.log_dir is None or self.metrics[abbr][1] in (IMAGE, INVIZ, CUSTOM):
-                if flag_epoch_end:
-                    _ = self._formatAsStr(stage, abbr, value, epoch, -1, mpe)
                 continue
             global_mile = ((epoch - 1) * mpe + mile) if known_mpe else mile
             metric_id = self._metric_id(stage, abbr)
@@ -2218,26 +2232,26 @@ class Dash(object):
             self._ensure_metric_storage(metric_id)
             if isinstance(value, np.ndarray) and value.dtype == np.float16:
                 value = value.astype(np.float32)
-            self.win_mile[metric_id][(global_mile - 1) % self.window] = value
             if known_mpe:
-                if len(self.gauge_epoch[metric_id]) == len(self.trail_epoch[metric_id]):
+                sample = active['metrics'].get(metric_id)
+                if sample is None:
+                    sample = {'index': len(self.gauge_epoch[metric_id]), 'count': 0}
+                    active['metrics'][metric_id] = sample
                     self.gauge_epoch[metric_id].append(0.0)
-                self.gauge_epoch[metric_id][-1] += value
-            if global_mile < self.window:
-                gauge = np.array(self.win_mile[metric_id][:global_mile]).mean()
+                    self.trail_epoch[metric_id].append(epoch)
+                sample['count'] += 1
+                index = sample['index']
+                mean = self.gauge_epoch[metric_id][index]
+                self.gauge_epoch[metric_id][index] = mean + (value - mean) / sample['count']
+            sample_number = len(self.gauge_mile[metric_id]) + 1
+            self.win_mile[metric_id][(sample_number - 1) % self.window] = value
+            if sample_number < self.window:
+                gauge = np.array(self.win_mile[metric_id][:sample_number]).mean()
             else:
                 gauge = np.array(self.win_mile[metric_id]).mean()
             self.gauge_mile[metric_id].append(gauge)
             if len(self.trail_mile[metric_id]) < len(self.gauge_mile[metric_id]):
                 self.trail_mile[metric_id].append(global_mile)
-            if flag_epoch_end:
-                self.gauge_epoch[metric_id][-1] /= mpe
-                if len(self.trail_epoch[metric_id]) < len(self.gauge_epoch[metric_id]):
-                    self.trail_epoch[metric_id].append(epoch)
-                indicator = self._formatAsStr(stage, abbr, self.gauge_epoch[metric_id][-1], epoch, -1, mpe)
-                string_epoch += indicator
-                if indicator != '':
-                    epoch_visible_count += 1
 
         metric_ids = self._current_metric_ids(items)
         if self.display_mode == 'fullscreen':
@@ -2259,19 +2273,8 @@ class Dash(object):
         epoch_display = None
         epoch_summary_offset = len(self.epoch_summaries)
         if flag_epoch_end:
-            mileage = str(epoch * mpe)
-            epoch_display = '| %d%s Epoch ⚘ %s Miles ₪ %.2fs/epoch | %s |%s' % (
-                epoch,
-                ordinal,
-                mileage,
-                (time.time() - self.time),
-                stage,
-                string_epoch,
-            )
-            self.epoch_summaries.append(epoch_display)
-            self.epoch_page = 0
+            epoch_display, epoch_visible_count = self._close_epoch(stage)
             epoch_summary_offset = len(self.epoch_summaries) - 1
-            self.time = time.time()
 
         raw_state = {
             'epoch': epoch,
@@ -2301,6 +2304,34 @@ class Dash(object):
                 self._render_inline(state, wipe=wipe, flush=flush)
             elif flag_epoch_end:
                 self._render_inline(state, wipe=wipe, flush=flush)
+
+    def _close_epoch(self, stage):
+        active = self._active_epochs.pop(stage, None)
+        if active is None:
+            return None, 0
+        epoch, mpe, mile = active['epoch'], active['mpe'], active['mile']
+        indicators = []
+        for metric_id, sample in active['metrics'].items():
+            value = self.gauge_epoch[metric_id][sample['index']]
+            indicators.append(self._formatAsStr(stage, metric_id[1], value, epoch, -1, mpe))
+        for abbr, value in active['entry'].items():
+            if self.log_dir is None or self.metrics[abbr][1] in (IMAGE, INVIZ, CUSTOM):
+                self._formatAsStr(stage, abbr, value, epoch, -1, mpe)
+        partial = ' partial %d/%d' % (mile, mpe) if mpe is not None and mpe > 0 and mile < mpe else ''
+        mileage = (epoch - 1) * mpe + mile if mpe is not None and mpe > 0 else mile
+        display = '| %d%s Epoch ⚘ %s Miles ₪ %.2fs/epoch | %s%s |%s' % (
+            epoch, self._get_ordinal(epoch), mileage, time.time() - active['started'],
+            stage, partial, ''.join(indicators),
+        )
+        self.epoch_summaries.append(display)
+        self.epoch_page = 0
+        self.max_epoch = max(self.max_epoch, epoch)
+        return display, sum(bool(indicator) for indicator in indicators)
+
+    def end_epoch(self, stage='ITER'):
+        if self.show and stage in self._active_epochs:
+            self._close_epoch(stage)
+            self._render_last_state()
 
     def read(self, entry, stage, epoch=-1):
         if not self.show:

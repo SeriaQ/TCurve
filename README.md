@@ -71,6 +71,20 @@ for item in tc.Dash(
     time.sleep(0.3)
 ```
 
+For a fixed `mpe`, epoch averages use the number of values actually reported for each metric. If a loop ends early, call `end_epoch(stage=...)` to close that stage's current epoch:
+
+```python
+dash = tc.Dash(metrics={'Loss': ['.3f', tc.RAW]})
+for mile, loss in enumerate(losses):
+    dash({'Loss': loss}, epoch=0, mile=mile, mpe=len(losses), stage='TRAIN')
+    if should_stop(loss):
+        break
+dash.end_epoch(stage='TRAIN')
+dash.finalize(review=False)
+```
+
+Repeated `end_epoch()` calls are harmless, including after reaching `mpe`. An early summary is marked `partial`, such as `partial 60/100`. Starting a new epoch in the same stage or calling `finalize()` also closes unfinished epochs. Switching stages leaves each stage's epoch open independently. `read()` returns the current average even before an epoch ends.
+
 The genre macros are listed below.
 
 - RAW: display as it is
@@ -169,6 +183,8 @@ Try to squint at the right side. :D
 ## 🧭 Fullscreen Dashboard
 
 TCurve starts in inline mode by default. In a large enough interactive terminal, press `s` to switch to fullscreen mode while the dashboard is running. Press `s` again to return to inline output.
+
+Inline mode shows recent epoch summaries in chronological order above the current curve, image, view controls, and progress line. Older summaries are hidden when space is limited so the current display fits within the terminal.
 
 Fullscreen mode keeps the curve, epoch summaries, image preview, events, and help panel in a single screen. The common keys are:
 
