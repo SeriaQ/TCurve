@@ -24,6 +24,9 @@ class QuietOutputMixin:
         self._redirect_stderr = redirect_stderr(self._stderr_buffer)
         self._redirect_stdout.__enter__()
         self._redirect_stderr.__enter__()
+        self._tty_output = mock.patch('tcurve.dash.Dash._output_is_tty', return_value=True)
+        self._tty_output.start()
+        self.addCleanup(self._tty_output.stop)
 
     def tearDown(self):
         self._redirect_stderr.__exit__(None, None, None)
@@ -445,7 +448,6 @@ class DashDisplayModeTests(QuietOutputMixin, unittest.TestCase):
 
         self._stdout_buffer.seek(0)
         self._stdout_buffer.truncate(0)
-        dash._is_interactive_terminal = lambda: True
         dash._render_inline(dash._last_frame_state)
 
         output = self._stdout_buffer.getvalue()
@@ -858,6 +860,150 @@ class DashFormatTests(QuietOutputMixin, unittest.TestCase):
         self.assertEqual(observed, [(3, 1, 1, 1, 'ITER'), (3, 1, -1, 1, 'ITER')])
 
 
+class DashRefreshTests(QuietOutputMixin, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.clock = mock.patch('tcurve.dash.time.monotonic', return_value=100.0)
+        self.now = self.clock.start()
+        self.addCleanup(self.clock.stop)
+
+    def make_dash(self, **kwargs):
+        dash = tc.Dash(metrics={'loss': ['.2f', tc.RAW]}, **kwargs)
+        dash._render_inline = mock.Mock()
+        dash._render_fullscreen = mock.Mock()
+        return dash
+
+    def test_default_throttles_building_but_preserves_samples(self):
+        dash = self.make_dash()
+        with mock.patch.object(dash, '_build_frame_state', wraps=dash._build_frame_state) as build:
+            for mile, elapsed in enumerate([0, 0.02, 0.05, 0.11]):
+                self.now.return_value = 100 + elapsed
+                dash({'loss': float(mile)}, 0, mile, 20, plot=False)
+            self.assertEqual(build.call_count, 2)
+        self.assertEqual(dash._render_inline.call_count, 2)
+        self.assertEqual(len(dash.gauge_mile[('ITER', 'loss')]), 4)
+        self.assertEqual(dash.read('loss', 'ITER'), 1.5)
+
+    def test_step_and_time_gates_must_both_pass(self):
+        dash = self.make_dash()
+        for mile, elapsed in enumerate([0, 0.01, 0.05, 0.2, 0.21, 0.22]):
+            self.now.return_value = 100 + elapsed
+            dash({'loss': 1.0}, 0, mile, 20, interv=3, plot=False)
+        rendered_miles = [call.args[0]['mile'] for call in dash._render_inline.call_args_list]
+        self.assertEqual(rendered_miles, [1, 6])
+
+    def test_time_only_supports_unknown_total_and_nonpositive_interv(self):
+        for interv in (0, -1):
+            dash = self.make_dash()
+            for mile, elapsed in enumerate([0, 0.02, 0.11]):
+                self.now.return_value = 100 + elapsed
+                dash({'loss': 1.0}, 0, mile, None, interv=interv, plot=False)
+            self.assertEqual(dash._render_inline.call_count, 2)
+
+    def test_nonpositive_time_gate_retains_step_only_refresh(self):
+        for interval in (0, -1):
+            dash = self.make_dash(refresh_interv=interval)
+            for mile in range(4):
+                dash({'loss': 1.0}, 0, mile, 20, interv=2, plot=False)
+            self.assertEqual([call.args[0]['mile'] for call in dash._render_inline.call_args_list], [1, 2, 4])
+
+    def test_invalid_settings_fail_before_terminal_or_statistics(self):
+        for interv, interval in [(0, 0), (-1, -1), (1.5, 0.1), (True, 0.1),
+                                 (1, float('nan')), (1, float('inf')), (1, 'fast')]:
+            dash = self.make_dash()
+            dash._ensure_input_listener = mock.Mock()
+            with self.subTest(interv=interv, interval=interval):
+                with self.assertRaises(ValueError):
+                    dash({'loss': 1.0}, 0, 0, 20, interv=interv, refresh_interv=interval)
+                dash._ensure_input_listener.assert_not_called()
+                self.assertFalse(dash.gauge_mile)
+        with self.assertRaises(ValueError):
+            tc.Dash(range(2), interv=0, refresh_interv=0)
+
+    def test_stage_epoch_and_completion_boundaries_refresh_immediately(self):
+        dash = self.make_dash(refresh_interv=100)
+        for stage, epoch, mile in [('TRAIN', 0, 0), ('VAL', 0, 0),
+                                   ('TRAIN', 1, 0), ('TRAIN', 1, 9)]:
+            dash({'loss': 1.0}, epoch, mile, 10, stage=stage, interv=10, plot=False)
+        self.assertEqual(dash._render_inline.call_count, 4)
+
+    def test_finalize_renders_latest_unknown_total_and_wipe_state(self):
+        dash = self.make_dash(refresh_interv=100)
+        dash({'loss': 1.0}, 0, 0, None, plot=False, wipe=True)
+        dash({'loss': 4.0}, 0, 1, None, plot=False, wipe=True)
+        self.assertEqual(dash._render_inline.call_count, 1)
+        dash.finalize(review=False)
+        self.assertEqual(dash._render_inline.call_count, 2)
+        self.assertIn('4.00', dash._render_inline.call_args.args[0]['string_mile'])
+        self.assertTrue(dash._render_inline.call_args.kwargs['wipe'])
+
+    def test_end_epoch_and_keyboard_use_latest_throttled_data(self):
+        dash = self.make_dash(refresh_interv=100)
+        dash({'loss': 1.0}, 0, 0, 10, stage='TRAIN', plot=False)
+        dash({'loss': 4.0}, 0, 1, 10, stage='TRAIN', plot=False)
+        dash._handle_key('g')
+        self.assertEqual(dash._render_inline.call_count, 2)
+        self.assertIn('4.00', dash._render_inline.call_args.args[0]['string_mile'])
+        dash.end_epoch(stage='TRAIN')
+        self.assertEqual(dash._render_inline.call_count, 3)
+
+    def test_callbacks_follow_step_gate_without_time_throttling(self):
+        callback = mock.Mock(return_value='custom')
+        dash = tc.Dash(metrics={'value': [callback, tc.CUSTOM]}, refresh_interv=100)
+        dash._render_inline = mock.Mock()
+        for mile in range(4):
+            dash({'value': mile}, 0, mile, 10, plot=False)
+        self.assertEqual(callback.call_count, 4)
+        self.assertEqual(dash._render_inline.call_count, 1)
+
+    def test_skipped_refresh_does_not_sample_resources(self):
+        dash = self.make_dash(refresh_interv=100)
+        dash.resources_active = True
+        dash.resource_monitor = mock.Mock()
+        dash({'loss': 1.0}, 0, 0, 10, plot=False)
+        dash({'loss': 2.0}, 0, 1, 10, plot=False)
+        self.assertEqual(dash.resource_monitor.snapshot.call_count, 1)
+
+    def test_step_duration_updates_even_without_rendering(self):
+        dash = self.make_dash(refresh_interv=100)
+        with mock.patch('tcurve.dash.time.time', return_value=100.0) as wall:
+            dash({'loss': 1.0}, 0, 0, 10, plot=False)
+            wall.return_value = 100.02
+            dash({'loss': 2.0}, 0, 1, 10, plot=False)
+        self.assertEqual(dash._last_frame_state['duration'], '0.020')
+        self.assertEqual(dash._render_inline.call_count, 1)
+
+    def test_time_gating_applies_to_fullscreen_and_wrapper(self):
+        dash = self.make_dash()
+        dash.display_mode = 'fullscreen'
+        dash({'loss': 1.0}, 0, 0, 10, plot=False)
+        dash({'loss': 2.0}, 0, 1, 10, plot=False)
+        self.assertEqual(dash._render_fullscreen.call_count, 1)
+        wrapped = tc.Dash(range(4), metrics={'loss': ['.2f', tc.RAW]}, refresh_interv=100, plot=False)
+        wrapped._render_inline = mock.Mock()
+        self.assertEqual(list(wrapped), [0, 1, 2, 3])
+        self.assertEqual(wrapped._render_inline.call_count, 2)
+        self.assertIn('3.00', wrapped._render_inline.call_args.args[0]['string_mile'])
+
+    def test_metric_rotation_advances_on_displayed_updates(self):
+        for interv in (0, 2):
+            dash = tc.Dash(metrics={'a': ['.2f', tc.RAW], 'b': ['.2f', tc.RAW]})
+            dash._render_inline = mock.Mock()
+            for mile, elapsed in enumerate([0, 0.01, 0.02, 0.11, 0.12, 0.22]):
+                self.now.return_value = 100 + elapsed
+                dash({'a': 1.0, 'b': 2.0}, 0, mile, 20, interv=interv, in_loop=(0, 1), last_for=1)
+            selected = [call.args[0]['selected_metric'] for call in dash._render_inline.call_args_list]
+            self.assertEqual(len(selected), 3)
+            self.assertNotEqual(selected[0], selected[1])
+            self.assertEqual(selected[0], selected[2])
+
+    def test_call_can_override_constructor_time_interval(self):
+        dash = self.make_dash(refresh_interv=100)
+        for mile in range(3):
+            dash({'loss': 1.0}, 0, mile, 10, plot=False, refresh_interv=0)
+        self.assertEqual(dash._render_inline.call_count, 3)
+
+
 class DashEpochSummaryTests(QuietOutputMixin, unittest.TestCase):
     def test_partial_epoch_uses_actual_metric_counts_and_closes_once(self):
         dash = tc.Dash(metrics={'loss': ['.2f', tc.RAW], 'acc': ['.1f', tc.PERCENT]})
@@ -1144,7 +1290,7 @@ class DashLoggingTests(QuietOutputMixin, unittest.TestCase):
         fig = mock.Mock()
         fig.add_subplot.return_value = mock.Mock()
         fake_plt = mock.Mock()
-        fake_plt.figure.return_value = fig
+        fake_plt.return_value = fig
         fake_pd = mock.Mock()
         fake_pd.DataFrame.side_effect = lambda *args, **kwargs: {'args': args, 'kwargs': kwargs}
         fake_sns = mock.Mock()
@@ -1167,7 +1313,7 @@ class DashLoggingTests(QuietOutputMixin, unittest.TestCase):
             dash.trail_mile[metric_id] = [1, 2]
 
         fake_plt = mock.Mock()
-        fake_plt.figure.return_value.add_subplot.return_value = mock.Mock()
+        fake_plt.return_value.add_subplot.return_value = mock.Mock()
         fake_pd = mock.Mock()
         fake_pd.DataFrame.side_effect = lambda *args, **kwargs: {'args': args, 'kwargs': kwargs}
         fake_sns = mock.Mock()
@@ -1175,7 +1321,7 @@ class DashLoggingTests(QuietOutputMixin, unittest.TestCase):
         with mock.patch('tcurve.dash._import_logging_deps', return_value=(fake_plt, fake_pd, fake_sns)):
             dash.plot_curves(subdir='plots', select=[('TRAIN', 'loss'), ('TRAIN', 'acc')], group_by=tc.NOTHING)
 
-        saved = [os.path.basename(call.args[0]) for call in fake_plt.savefig.call_args_list]
+        saved = [os.path.basename(call.args[0]) for call in fake_plt.return_value.savefig.call_args_list]
         self.assertEqual(saved, ['all_0.7_mile_2.jpg'])
         self.assertEqual(fake_sns.lineplot.call_count, 2)
 
@@ -1184,7 +1330,7 @@ class DashLoggingTests(QuietOutputMixin, unittest.TestCase):
         with mock.patch('tcurve.dash._import_logging_deps', return_value=(fake_plt, fake_pd, fake_sns)):
             dash.plot_curves(subdir='plots', select=[('TRAIN', 'loss'), ('VAL', 'loss')], group_by=tc.METRIC)
 
-        saved = [os.path.basename(call.args[0]) for call in fake_plt.savefig.call_args_list]
+        saved = [os.path.basename(call.args[0]) for call in fake_plt.return_value.savefig.call_args_list]
         self.assertEqual(saved, ['loss_0.9_mile_2.jpg'])
         self.assertEqual(fake_sns.lineplot.call_count, 2)
 

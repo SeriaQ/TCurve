@@ -71,6 +71,18 @@ for item in tc.Dash(
     time.sleep(0.3)
 ```
 
+Regular display updates default to `interv=1` and `refresh_interv=0.1` seconds. Set `refresh_interv` on `Dash`, or override it on an individual call. A positive `interv` enables the step condition; a positive `refresh_interv` enables the time condition. When both are enabled, both must pass. Zero or negative values disable that condition; disabling both raises an error.
+
+```python
+dash = tc.Dash(metrics={'Loss': ['.3f', tc.RAW]}, refresh_interv=0.2)
+for mile, loss in enumerate(losses):
+    # Time-only display updates; statistics still include every call.
+    dash({'Loss': loss}, 0, mile, len(losses), interv=0)
+dash.finalize(review=False)
+```
+
+For step-only updates, set `refresh_interv=0` and use a positive `interv`. With `interv=10, refresh_interv=0.2`, regular updates occur only at steps 10, 20, 30, ... and only if at least 0.2 seconds have elapsed since the last display update. The first frame, stage or epoch changes, epoch completion, `end_epoch()`, finalization with pending data, and keyboard actions refresh immediately. There is no background refresh thread: new updates require a call to Dash. Time throttling does not reduce user callback execution under the step rule or change per-step timing.
+
 For a fixed `mpe`, epoch averages use the number of values actually reported for each metric. If a loop ends early, call `end_epoch(stage=...)` to close that stage's current epoch:
 
 ```python
@@ -151,7 +163,7 @@ for i, a in enumerate(fake_acc):
 
 When you have several variables, set in_loop and last_for to switch among them.
 
-*e.g* in_loop=(0, 1), last_for=5 means dashboard is going to show curves of var[0] and var[1] in turns. The displayed curve changes every 5 steps.
+*e.g* in_loop=(0, 1), last_for=5 means dashboard is going to show curves of var[0] and var[1] in turns. The displayed curve changes every 5 displayed updates, so time throttling does not skip metrics in the rotation.
 
 ```python
 tcd = tc.Dash(metrics={'Acc': ['.1f', tc.PERCENT], 'Level': ['.d', tc.RAW]})
@@ -186,6 +198,8 @@ TCurve starts in inline mode by default. In a large enough interactive terminal,
 
 Inline mode shows recent epoch summaries in chronological order above the current curve, image, view controls, and progress line. Older summaries are hidden when space is limited so the current display fits within the terminal.
 
+When stdout is not a terminal, such as when redirected to a file or pipe, TCurve automatically writes plain-text completion summaries instead of a dynamic dashboard. Each completed epoch is written once, including partial epochs closed by `end_epoch()` or `finalize()`. For unknown `mpe`, `finalize()` writes the latest progress once. No terminal control sequences, character previews, or repeated frames are emitted, and summaries are not clipped to terminal width. Statistics and callbacks still run normally.
+
 Fullscreen mode keeps the curve, epoch summaries, image preview, events, and help panel in a single screen. The common keys are:
 
 - `s`: switch between inline and fullscreen mode
@@ -214,11 +228,24 @@ Resource monitoring is opt-in. Set `resources=True`, switch to fullscreen mode, 
 dash = tc.Dash(metrics={'Loss': ['.3f', tc.RAW]}, resources=True)
 ```
 
-When you use fullscreen mode with a manually called `Dash`, use `with` or call `finalize()` after the loop so the final review screen is closed cleanly. The iterable wrapper handles this automatically.
+When you manually call `Dash`, use `with` or call `finalize()` after the loop in both inline and fullscreen modes. This restores the terminal and releases its dashboard ownership. The iterable wrapper handles this automatically when it is exhausted; use `with` or explicit finalization if you break out early.
 
 After a fullscreen run finishes, `finalize(review=True)` keeps the final dashboard interactive until you press `q`. Use `review=False` to close it immediately.
 
 `finalize()` stops keyboard monitoring and restores the terminal input mode. A force-killed process cannot run cleanup; if the terminal no longer echoes input after `kill -9`, run `stty sane`.
+
+On POSIX systems, only one active Dash may use a terminal at a time. Ownership starts on first terminal use, remains held between updates and during fullscreen review, and is released after `finalize()` finishes. A second Dash using the same terminal raises an error before modifying the terminal. Separate terminals can run separate dashboards, and redirected output does not acquire terminal ownership.
+
+For multiprocessing, display in the main process and send or aggregate worker metrics there. Each process keeps its own statistics; TCurve does not merge them. `show=False` skips statistics as well as display. Use separate log directories when processes export independently to avoid overwriting matching filenames. Create Dash inside the process that uses it; a fork-inherited Dash cannot be used in a child process.
+
+```python
+# In the main process, after aggregating metrics from workers:
+with tc.Dash(metrics={'Loss': ['.3f', tc.RAW]}) as dash:
+    for mile, loss in enumerate(losses_from_workers):
+        dash({'Loss': loss}, epoch=0, mile=mile, mpe=None, stage='TRAIN')
+```
+
+The operating system releases the terminal lock when its owning process exits, including after `kill -9`. This releases ownership but cannot restore terminal input mode after a force kill.
 
 ```python
 with tc.Dash(metrics={'Loss': ['.3f', tc.RAW]}, resources=True) as dash:
@@ -245,6 +272,8 @@ tcd.log(subdir='run_demo')
 `log(subdir='run_demo')` saves both curve plots and CSV files under `log_dir/run_demo`. If you need only one kind of output, call `plot_curves(subdir=...)` or `export_csv(subdir=...)` directly.
 
 `plot_curves` can choose exact curves with `(stage, metric)` pairs and group them with `SERIES`, `METRIC`, `STAGE`, or `NOTHING`. Non-scalar metrics such as `IMAGE`, `INVIZ`, and `CUSTOM` are not plotted.
+
+Image export uses independent Matplotlib Agg canvases and works without a graphical display. No backend setup is required, and TCurve does not switch the application's Matplotlib backend or close its existing figures.
 
 ```python
 tcd.plot_curves(select=[('TRAIN', 'Loss')], group_by=tc.SERIES)

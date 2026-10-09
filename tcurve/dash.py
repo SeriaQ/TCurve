@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
-from .utils import curve2str
+from .utils import curve2str, _new_plot_figure
 from .resources import ResourceMonitor
 import atexit
+import math
+import numbers
 from collections import deque
 from collections.abc import Iterable
 import numpy as np
@@ -11,14 +13,17 @@ import re
 import select
 import shutil
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
 
 try:
+    import fcntl
     import termios
     import tty
 except ImportError:  # pragma: no cover - unavailable on some platforms
+    fcntl = None
     termios = None
     tty = None
 
@@ -37,14 +42,13 @@ NOTHING = 13
 
 def _import_logging_deps():
     try:
-        import matplotlib.pyplot as plt
         import pandas as pd
         import seaborn as sns
     except ImportError as exc:
         raise ImportError(
             'TCurve logging requires optional dependencies: pandas, matplotlib, seaborn.'
         ) from exc
-    return plt, pd, sns
+    return _new_plot_figure, pd, sns
 
 
 class Dash(object):
@@ -52,7 +56,8 @@ class Dash(object):
     linestyle = ['-', '--', '-.', ':']
     char_pixel = "∎◙⧫●♠◕◍❅☢◭◮◔⎖✠⚙☮☒♾@$B8&WM#⦷⦶*mwap॥✝0QOo◇⨞u+/()?i!lI1[]|_;:࿒\"^∸⌯~⊷-⊸,'`.⋄· "
         
-    def __init__(self, log_dir='./logbook', window=1, divisor=12, span=60, metrics=None, show=True, resources=False, **kwargs):
+    def __init__(self, log_dir='./logbook', window=1, divisor=12, span=60, metrics=None, show=True, resources=False,
+                 refresh_interv=0.1, **kwargs):
         '''
         Args:
         >| log_dir: a directory to store log files or an iterable
@@ -62,7 +67,13 @@ class Dash(object):
         >| metrics: a dict whose values are [display_format, mode], e.g. {'Acc': ['.1f', PERCENT]}
         >| show: whether to show in current process
         >| resources: whether fullscreen resource monitoring can be enabled with "r"
+        >| refresh_interv: minimum seconds between regular refreshes; nonpositive disables time gating
         '''
+        self._validate_refresh_intervals(kwargs.get('interv', 1), refresh_interv)
+        self.refresh_interv = refresh_interv
+        self._last_refresh_time = None
+        self._frame_pending = False
+        self._inline_refresh_count = 0
         if isinstance(log_dir, str):
             for k in kwargs.keys():
                 raise AssertionError('TCURVE ERROR ៙ Dash does not take "%s" as argument.' % k)
@@ -138,6 +149,8 @@ class Dash(object):
         self._stdin_fd = None
         self._stdin_attrs = None
         self._restore_registered = False
+        self._owner_pid = os.getpid()
+        self._terminal_lock_fd = None
         self._fullscreen_active = False
         self._last_frame_state = None
         self._inline_rewind_lines = 0
@@ -380,6 +393,15 @@ class Dash(object):
             assert k in allowed, 'TCURVE ERROR ៙ Dash does not take "%s" as argument.' % k
         return dict(kwargs)
 
+    def _validate_refresh_intervals(self, interv, refresh_interv):
+        if isinstance(interv, bool) or not isinstance(interv, numbers.Integral):
+            raise ValueError('TCURVE ERROR ៙ "interv" must be an integer.')
+        if (isinstance(refresh_interv, bool) or not isinstance(refresh_interv, numbers.Real) or
+                not math.isfinite(refresh_interv)):
+            raise ValueError('TCURVE ERROR ៙ "refresh_interv" must be a finite number of seconds.')
+        if interv <= 0 and refresh_interv <= 0:
+            raise ValueError('TCURVE ERROR ៙ at least one of "interv" and "refresh_interv" must be positive.')
+
     def _make_entry(self, item):
         if 'entry_fn' in self.wrapper_kwargs:
             entry = self.wrapper_kwargs['entry_fn'](self.cnt, item)
@@ -469,10 +491,20 @@ class Dash(object):
 
     def _is_interactive_terminal(self):
         return bool(
-            termios is not None and tty is not None and
+            fcntl is not None and termios is not None and tty is not None and
             getattr(sys.stdin, 'isatty', lambda: False)() and
             getattr(sys.stdout, 'isatty', lambda: False)()
         )
+
+    def _output_is_tty(self):
+        return bool(getattr(sys.stdout, 'isatty', lambda: False)())
+
+    def _write_plain_summary(self, text):
+        text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', str(text))
+        text = ' '.join(text.splitlines()).replace('\t', ' ')
+        text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)
+        sys.stdout.write(text.rstrip() + '\n')
+        sys.stdout.flush()
 
     def _is_fullscreen_available(self):
         if not self._is_interactive_terminal():
@@ -480,7 +512,52 @@ class Dash(object):
         columns, lines = self._get_terminal_size()
         return columns >= self.fullscreen_min_width and lines >= self.fullscreen_min_height
 
+    def _check_owner_process(self):
+        if os.getpid() != self._owner_pid:
+            raise RuntimeError('TCURVE ERROR ៙ a Dash inherited from another process cannot be used; create a new Dash in this process.')
+
+    def _acquire_terminal(self):
+        self._check_owner_process()
+        if (self._terminal_lock_fd is not None or not self.show or fcntl is None or
+                not getattr(sys.stdout, 'isatty', lambda: False)()):
+            return
+        terminal = os.fstat(sys.stdout.fileno())
+        lock_path = os.path.join(tempfile.gettempdir(), 'tcurve-%d-%d-%d-%d.lock' % (
+            os.getuid(), terminal.st_dev, terminal.st_ino, terminal.st_rdev,
+        ))
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(fd)
+            raise RuntimeError(
+                'TCURVE ERROR ៙ this terminal is already occupied by another Dash; '
+                'display only in the main process, use a separate terminal, or finalize the active Dash.'
+            ) from exc
+        except BaseException:
+            os.close(fd)
+            raise
+        self._terminal_lock_fd = fd
+        if not self._restore_registered:
+            atexit.register(self._cleanup_terminal)
+            if hasattr(os, 'register_at_fork'):
+                os.register_at_fork(after_in_child=self._release_terminal)
+            self._restore_registered = True
+
+    def _release_terminal(self):
+        if self._terminal_lock_fd is not None:
+            os.close(self._terminal_lock_fd)
+            self._terminal_lock_fd = None
+
+    def _cleanup_terminal(self):
+        try:
+            self._stop_input_listener()
+        finally:
+            self._release_terminal()
+
     def _restore_input_mode(self):
+        if os.getpid() != self._owner_pid:
+            return
         if self._stdin_fd is not None and self._stdin_attrs is not None and termios is not None:
             try:
                 termios.tcsetattr(self._stdin_fd, termios.TCSADRAIN, self._stdin_attrs)
@@ -490,6 +567,8 @@ class Dash(object):
         self._stdin_attrs = None
 
     def _stop_input_listener(self):
+        if os.getpid() != self._owner_pid:
+            return
         self._input_stop.set()
         thread = self._input_thread
         if thread is not None and thread is not threading.current_thread():
@@ -499,6 +578,7 @@ class Dash(object):
         self._restore_input_mode()
 
     def _ensure_input_listener(self):
+        self._acquire_terminal()
         if self._input_listener_started or not self.show or not self._is_interactive_terminal():
             return
         try:
@@ -513,9 +593,6 @@ class Dash(object):
         self._input_thread = threading.Thread(target=self._input_loop, daemon=True)
         self._input_thread.start()
         self._input_listener_started = True
-        if not self._restore_registered:
-            atexit.register(self._restore_input_mode)
-            self._restore_registered = True
 
     def _queue_key(self, key):
         with self._pending_key_lock:
@@ -544,12 +621,14 @@ class Dash(object):
         return keys
 
     def _set_display_mode(self, mode):
+        self._check_owner_process()
         if mode == self.display_mode:
             return True
         if mode == 'fullscreen' and not self._is_fullscreen_available():
             return False
         if self.show and self._is_interactive_terminal():
             if mode == 'fullscreen' and not self._fullscreen_active:
+                self._acquire_terminal()
                 sys.stdout.write('\033[?1049h\033[2J\033[H')
                 sys.stdout.flush()
                 self._fullscreen_active = True
@@ -567,7 +646,7 @@ class Dash(object):
         self.events.append(f'{stamp}  {message}')
 
     def _print_inline_notice(self, message):
-        if self.show:
+        if self.show and self._output_is_tty():
             print(message)
 
     def _timestamp_token(self):
@@ -1438,6 +1517,9 @@ class Dash(object):
         return body
 
     def _render_fullscreen(self, state):
+        if not self._output_is_tty():
+            return
+        self._acquire_terminal()
         if not self._fullscreen_active:
             self._set_display_mode('fullscreen')
         width, height = self._get_terminal_size()
@@ -1588,6 +1670,9 @@ class Dash(object):
         sys.stdout.flush()
 
     def _render_inline(self, state, wipe=False, flush=0):
+        if not self._output_is_tty():
+            return
+        self._acquire_terminal()
         stream = sys.stdout
         width = state['width']
         view_line = ''
@@ -1748,7 +1833,7 @@ class Dash(object):
         mile = state['mile']
         mpe = state['mpe']
         known_mpe = state['known_mpe']
-        interv = state.get('interv', 1)
+        interv = max(1, state.get('interv', 1))
         if known_mpe:
             progress = int((mile - 1) / mpe * 20 + 0.4)
             pre_bar = ''
@@ -1786,8 +1871,17 @@ class Dash(object):
         )
         return status_line_inline, status_line_fullscreen
 
+    def _format_frame_metrics(self, state):
+        return ''.join(
+            self._formatAsStr(state['stage'], abbr, value, state['epoch'], state['mile'], state['mpe'])
+            if self.metrics[abbr][1] in (RAW, PERCENT) else state['callback_strings'].get(abbr, '')
+            for abbr, value in state['display_entry'].items()
+        )
+
     def _build_frame_state(self, base_state):
         state = dict(base_state)
+        if 'display_entry' in state:
+            state['string_mile'] = self._format_frame_metrics(state)
         width, height = self._get_terminal_size()
         state['width'] = max(1, width - 1)
         state['height'] = height
@@ -1862,16 +1956,28 @@ class Dash(object):
     def _render_last_state(self):
         if not self._last_frame_state:
             return
+        if not self._output_is_tty():
+            state = self._last_frame_state
+            if self._frame_pending and not state['known_mpe']:
+                state = dict(state)
+                state['string_mile'] = self._format_frame_metrics(state)
+                self._write_plain_summary(self._build_status_lines(state)[0])
+            self._frame_pending = False
+            return
         state = self._refresh_frame_state(self._last_frame_state)
         self._last_frame_state = state
         if self.display_mode == 'fullscreen':
             if self._can_render_cached_fullscreen():
                 self._render_fullscreen(state)
+                self._last_refresh_time = time.monotonic()
+                self._frame_pending = False
             return
         inline_state = dict(state)
         inline_state['epoch_display'] = None
         inline_state['epoch_summary_offset'] = len(self.epoch_summaries)
-        self._render_inline(inline_state, wipe=False, flush=0)
+        self._render_inline(inline_state, wipe=state.get('wipe', False), flush=state.get('flush', 0))
+        self._last_refresh_time = time.monotonic()
+        self._frame_pending = False
 
     def _handle_key(self, key):
         down_key = key in ('j', '\x1b[B')
@@ -2091,12 +2197,17 @@ class Dash(object):
         self._render_last_state()
 
     def finalize(self, review=True):
+        if os.getpid() != self._owner_pid:
+            self._release_terminal()
+            return
         try:
             if not self.show:
                 return
             if self._active_epochs:
                 for stage in list(self._active_epochs):
                     self._close_epoch(stage)
+                self._frame_pending = True
+            if self._frame_pending:
                 self._render_last_state()
             if self._last_frame_state is None:
                 return
@@ -2118,7 +2229,7 @@ class Dash(object):
                 self._exit_review = False
                 self._finish_inline()
             finally:
-                self._stop_input_listener()
+                self._cleanup_terminal()
 
     def __enter__(self):
         return self
@@ -2150,6 +2261,8 @@ class Dash(object):
                     value = (value.astype(np.float32)) / 255.
                 else:
                     raise TypeError('TCURVE ERROR ៙ the image dtype must be one of fp16, fp32 and uint8.')
+                if not self._output_is_tty():
+                    return ''
                 self.char_image = ''
                 self.image_row = 1
                 for y in range(0,H,2):
@@ -2184,7 +2297,9 @@ class Dash(object):
             raise StopIteration
 
     def __call__(self, entry, epoch, mile, mpe, stage='ITER', interv=1, duration=None, plot=True, wipe=False, flush=0,
-                is_global=True, is_elastic=False, in_loop=(-1,), last_for=1):
+                is_global=True, is_elastic=False, in_loop=(-1,), last_for=1, refresh_interv=None):
+        refresh_interv = self.refresh_interv if refresh_interv is None else refresh_interv
+        self._validate_refresh_intervals(interv, refresh_interv)
         if not self.show:
             return
         self._ensure_input_listener()
@@ -2205,14 +2320,17 @@ class Dash(object):
         active['mile'] = mile
         active['mpe'] = mpe
         active['entry'].update(entry)
-        string_mile = ''
-        flag_display = False
+        callback_strings = {}
+        step_due = interv <= 0 or mile % interv == 0
+        time_due = (refresh_interv <= 0 or self._last_refresh_time is None or
+                    time.monotonic() - self._last_refresh_time >= refresh_interv)
+        previous = self._last_frame_state
+        boundary = previous is None or previous['stage'] != stage or previous['epoch'] != epoch
+        flag_display = boundary or (step_due and time_due)
         flag_epoch_end = False
         epoch_visible_count = 0
         len_loop = len(in_loop)
         assert in_loop[0] < 0 or len_loop > 1, 'TCURVE ERROR ៙ the dashboard should loop through more than one curve.'
-        if mile % interv == 0:
-            flag_display = True
         if known_mpe and mile % mpe == 0:
             flag_epoch_end = True
             if epoch > self.max_epoch:
@@ -2222,8 +2340,8 @@ class Dash(object):
             self.first_call = False
         items = []
         for abbr, value in entry.items():
-            if flag_display or self.metrics[abbr][1] == INVIZ:
-                string_mile += self._formatAsStr(stage, abbr, value, epoch, mile, mpe)
+            if self.metrics[abbr][1] not in (RAW, PERCENT) and (step_due or self.metrics[abbr][1] == INVIZ):
+                callback_strings[abbr] = self._formatAsStr(stage, abbr, value, epoch, mile, mpe)
             if self.log_dir is None or self.metrics[abbr][1] in (IMAGE, INVIZ, CUSTOM):
                 continue
             global_mile = ((epoch - 1) * mpe + mile) if known_mpe else mile
@@ -2256,8 +2374,9 @@ class Dash(object):
         metric_ids = self._current_metric_ids(items)
         if self.display_mode == 'fullscreen':
             _ = self._select_fullscreen_metric(items)
-        elif flag_display and len(self.gauge_mile) > 0 and len(entry) > 0 and plot:
-            _ = self._select_inline_metric(items, mile, interv, in_loop, last_for)
+        elif (flag_display or flag_epoch_end) and len(self.gauge_mile) > 0 and len(entry) > 0 and plot:
+            self._inline_refresh_count += 1
+            _ = self._select_inline_metric(items, self._inline_refresh_count, 1, in_loop, last_for)
 
         ordinal = self._get_ordinal(epoch)
         if duration is None:
@@ -2283,7 +2402,9 @@ class Dash(object):
             'known_mpe': known_mpe,
             'stage': stage,
             'items': items,
-            'string_mile': string_mile,
+            'string_mile': '',
+            'display_entry': dict(entry),
+            'callback_strings': callback_strings,
             'duration': duration,
             'ordinal': ordinal,
             'interv': interv,
@@ -2291,19 +2412,25 @@ class Dash(object):
             'epoch_visible_count': epoch_visible_count,
             'epoch_summary_offset': epoch_summary_offset,
             'plot': plot,
+            'wipe': wipe,
+            'flush': flush,
             'default_view_is_global': is_global,
             'default_view_is_elastic': is_elastic,
         }
+        self._last_frame_state = raw_state
+        self._frame_pending = True
+        if not self._output_is_tty():
+            return
+        if not (flag_display or flag_epoch_end):
+            return
         state = self._build_frame_state(raw_state)
         self._last_frame_state = state
         if self.display_mode == 'fullscreen':
-            if flag_display or flag_epoch_end:
-                self._render_fullscreen(state)
+            self._render_fullscreen(state)
         else:
-            if flag_display:
-                self._render_inline(state, wipe=wipe, flush=flush)
-            elif flag_epoch_end:
-                self._render_inline(state, wipe=wipe, flush=flush)
+            self._render_inline(state, wipe=wipe, flush=flush)
+        self._last_refresh_time = time.monotonic()
+        self._frame_pending = False
 
     def _close_epoch(self, stage):
         active = self._active_epochs.pop(stage, None)
@@ -2316,7 +2443,11 @@ class Dash(object):
             indicators.append(self._formatAsStr(stage, metric_id[1], value, epoch, -1, mpe))
         for abbr, value in active['entry'].items():
             if self.log_dir is None or self.metrics[abbr][1] in (IMAGE, INVIZ, CUSTOM):
-                self._formatAsStr(stage, abbr, value, epoch, -1, mpe)
+                indicator = self._formatAsStr(stage, abbr, value, epoch, -1, mpe)
+                if self.log_dir is None and self.metrics[abbr][1] in (RAW, PERCENT):
+                    indicators.append(indicator)
+                elif not self._output_is_tty() and self.metrics[abbr][1] == CUSTOM:
+                    indicators.append(indicator)
         partial = ' partial %d/%d' % (mile, mpe) if mpe is not None and mpe > 0 and mile < mpe else ''
         mileage = (epoch - 1) * mpe + mile if mpe is not None and mpe > 0 else mile
         display = '| %d%s Epoch ⚘ %s Miles ₪ %.2fs/epoch | %s%s |%s' % (
@@ -2326,9 +2457,12 @@ class Dash(object):
         self.epoch_summaries.append(display)
         self.epoch_page = 0
         self.max_epoch = max(self.max_epoch, epoch)
+        if not self._output_is_tty():
+            self._write_plain_summary(display)
         return display, sum(bool(indicator) for indicator in indicators)
 
     def end_epoch(self, stage='ITER'):
+        self._check_owner_process()
         if self.show and stage in self._active_epochs:
             self._close_epoch(stage)
             self._render_last_state()
@@ -2494,10 +2628,10 @@ class Dash(object):
             boards.setdefault(self._plot_group_key(metric_id, group_by), []).append(metric_id)
         if not boards:
             return
-        plt, pd, sns = _import_logging_deps()
+        new_figure, pd, sns = _import_logging_deps()
         sns.set_theme()
         for group_key, metric_ids in boards.items():
-            fig = plt.figure()
+            fig = new_figure()
             ax = fig.add_subplot(111)
             plotted = False
             mile_tail = 0
@@ -2520,14 +2654,14 @@ class Dash(object):
                 mile_tail = max(mile_tail, mile_x[-1])
                 last_value = mile_y[-1]
             if plotted:
-                plt.savefig(os.path.join(
+                fig.savefig(os.path.join(
                     log_dir,
                     '%s_%.3g_mile_%d.jpg' % (self._plot_group_token(group_key), last_value, mile_tail),
                 ))
-            plt.close()
+            fig.clear()
 
         for group_key, metric_ids in boards.items():
-            fig = plt.figure()
+            fig = new_figure()
             ax = fig.add_subplot(111)
             plotted = False
             epoch_tail = 0
@@ -2548,8 +2682,8 @@ class Dash(object):
                 plotted = True
                 epoch_tail = max(epoch_tail, epoch_x[-1])
             if plotted:
-                plt.savefig(os.path.join(log_dir, '%s_epoch_%d.jpg' % (self._plot_group_token(group_key), max(self.max_epoch, epoch_tail))))
-            plt.close()
+                fig.savefig(os.path.join(log_dir, '%s_epoch_%d.jpg' % (self._plot_group_token(group_key), max(self.max_epoch, epoch_tail))))
+            fig.clear()
 
     def log(self, subdir=''):
         if not self.show:

@@ -4,13 +4,20 @@ import numpy as np
 
 def _import_plotting_deps():
     try:
-        import matplotlib.pyplot as plt
         import pandas as pd
     except ImportError as exc:
         raise ImportError(
             'TCurve plotting utilities require optional dependencies: pandas and matplotlib.'
         ) from exc
-    return plt, pd
+    return _new_plot_figure, pd
+
+
+def _new_plot_figure():
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    figure = Figure()
+    FigureCanvasAgg(figure)
+    return figure
 
 
 
@@ -278,17 +285,19 @@ def _get_color_wheel(bins=None):
 def plot_in_one(crv_names, crv_files, dst_path):
     assert len(crv_names)==len(crv_files), 'TCURVE ERROR ៙ the number of files does not match names.'
     assert len(crv_names) > 1, 'TCURVE ERROR ៙ one curve does not need to be drawn together.'
-    plt, pd = _import_plotting_deps()
+    new_figure, pd = _import_plotting_deps()
+    figure = new_figure()
+    ax = figure.add_subplot(111)
     palette = ['#F08080', '#00BFFF', '#FFFF00', '#2E8B57', '#6A5ACD', '#FFD700', '#808080']
     i = 0
     for n, f in zip(crv_names, crv_files):
         data = pd.read_csv(f, header=None).values
-        plt.plot(data[:,0], data[:,1], c=palette[i % len(palette)], label=n)
+        ax.plot(data[:,0], data[:,1], c=palette[i % len(palette)], label=n)
         i += 1
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(dst_path)
-    plt.close()
+    ax.legend()
+    ax.grid(True)
+    figure.savefig(dst_path)
+    figure.clear()
 
 
 def sprawl(root, desc=None, body='', branch=(), depth=-1, layer=0, outfile:object=None):

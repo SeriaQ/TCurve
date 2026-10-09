@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0
+
+- Add `refresh_interv`, defaulting to 0.1 seconds, alongside the existing step interval. When both are positive, both conditions must pass; disabling both raises an error.
+- Refresh immediately on the first frame, stage or epoch changes, epoch completion, user interaction, and finalization with pending data.
+- Preserve per-call statistics, callback execution under the step rule, and per-step timing while skipping unnecessary frame construction and resource sampling.
+- Rotate inline metrics by displayed updates rather than step numbers.
+- Add POSIX terminal ownership protection across Dash instances and processes, held until finalization or process exit.
+- Reject fork-inherited Dash instances in child processes and prevent child cleanup from restoring the parent's terminal state.
+- Automatically use plain-text completion summaries for non-TTY output, without ANSI sequences, repeated frames, or terminal-width clipping.
+- Report partial epoch summaries promptly and print the final progress once for unknown-length runs.
+- Use independent Matplotlib Agg canvases for headless image export without switching the application's backend or closing its figures.
+- Document refresh controls, multiprocessing, non-TTY output, and finalization for both inline and fullscreen modes.
+
 ## 0.2.6
 
 - Compute epoch averages from each metric's actual sample count, including unfinished epochs.
